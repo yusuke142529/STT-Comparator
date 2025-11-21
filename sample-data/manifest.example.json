@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "language": "ja-JP",
+  "items": [
+    { "audio": "sample_001.wav", "ref": "これはテストです。" },
+    { "audio": "sample_002.wav", "ref": "サンプルデータです。" }
+  ],
+  "normalization": {
+    "nfkc": true,
+    "stripPunct": true,
+    "stripSpace": true
+  }
+}

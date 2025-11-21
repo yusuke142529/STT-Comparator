@@ -10,6 +10,17 @@ venv/
 # Node
 node_modules/
 npm-debug.log
+dist/
+client/dist/
+.history/
+.pnpm-store/
+.pnpm/
+runs/
+.corepack-cache/
+
+# Vite/TS build artefacts accidentally committed
+client/src/*.js
+client/src/*.js.map
 
 # JetBrains
 .idea/

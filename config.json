@@ -1,0 +1,20 @@
+{
+  "audio": {
+    "targetSampleRate": 16000,
+    "targetChannels": 1,
+    "chunkMs": 250
+  },
+  "normalization": {
+    "nfkc": true,
+    "stripPunct": true,
+    "stripSpace": true,
+    "lowercase": false
+  },
+  "storage": {
+    "driver": "jsonl",
+    "path": "./runs/2025-11-19",
+    "retentionDays": 30,
+    "maxRows": 100000
+  },
+  "providers": ["mock", "deepgram"]
+}
