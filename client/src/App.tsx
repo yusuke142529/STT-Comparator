@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRetry } from './useRetry';
+import { useAudioInputDevices } from './hooks/useAudioInputDevices';
+import { useMicrophonePermission } from './hooks/useMicrophonePermission';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4100';
 
@@ -45,11 +47,23 @@ interface JobSummary {
   latencyMs: SummaryStats;
 }
 
+interface JobHistoryEntry {
+  jobId: string;
+  provider: string;
+  lang: string;
+  createdAt: string;
+  updatedAt: string;
+  total: number;
+  summary: JobSummary;
+}
+
 interface ProviderInfo {
   id: string;
   available: boolean;
   reason?: string;
   implemented?: boolean;
+  supportsStreaming?: boolean;
+  supportsBatch?: boolean;
 }
 
 interface FileResult {
@@ -127,7 +141,7 @@ const fetchJson = async <T,>(url: string): Promise<T> => {
 
 export default function App() {
   // Settings
-  const [provider, setProvider] = useState('mock');
+  const [provider, setProvider] = useState('deepgram');
   const [lang, setLang] = useState('ja-JP');
   const [enableInterim, setEnableInterim] = useState(true);
   const [enableVad, setEnableVad] = useState(false);
@@ -138,8 +152,9 @@ export default function App() {
 
   // Data / Status
   const [providers, setProviders] = useState<ProviderInfo[]>([
-    { id: 'mock', available: true, implemented: true },
-    { id: 'deepgram', available: true, implemented: true },
+    { id: 'deepgram', available: true, implemented: true, supportsStreaming: true, supportsBatch: true },
+    { id: 'local_whisper', available: true, implemented: true, supportsStreaming: false, supportsBatch: true },
+    { id: 'whisper_streaming', available: true, implemented: true, supportsStreaming: true, supportsBatch: true },
   ]);
   const [providerWarning, setProviderWarning] = useState<string | null>(null);
   const [tab, setTab] = useState<'realtime' | 'batch' | 'results'>('realtime');
@@ -154,6 +169,44 @@ export default function App() {
   const [latencyHistory, setLatencyHistory] = useState<RealtimeLatencySummary[]>([]);
   const [timezone, setTimezone] = useState<'local' | 'utc'>('local');
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const { devices: audioDevices, hasDevices, loading: audioDevicesLoading, error: audioDevicesError, refresh: refreshAudioDevices } =
+    useAudioInputDevices();
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string | null>(null);
+  useEffect(() => {
+    setSelectedAudioDeviceId((current) => {
+      if (current && audioDevices.some((device) => device.deviceId === current)) return current;
+      return audioDevices[0]?.deviceId ?? null;
+    });
+  }, [audioDevices]);
+  const selectedAudioDeviceLabel = useMemo(() => {
+    if (!selectedAudioDeviceId) return '未選択';
+    return audioDevices.find((device) => device.deviceId === selectedAudioDeviceId)?.label ?? '選択中のマイク';
+  }, [audioDevices, selectedAudioDeviceId]);
+  const { status: micPermission, refresh: refreshMicPermission } = useMicrophonePermission();
+  const micPermissionLabel = useMemo(() => {
+    switch (micPermission) {
+      case 'granted':
+        return '許可済み';
+      case 'prompt':
+        return '許可待ち';
+      case 'denied':
+        return '拒否';
+      default:
+        return '不明';
+    }
+  }, [micPermission]);
+  const micPermissionHint = useMemo(() => {
+    switch (micPermission) {
+      case 'granted':
+        return `マイクの使用が許可されています（入力: ${selectedAudioDeviceLabel}）。録音を開始できます。`;
+      case 'prompt':
+        return '「録音開始」を押すとマイク許可ダイアログが表示されますので、「許可」を選択してください。';
+      case 'denied':
+        return 'ブラウザのサイト設定（マイク）でこのサイトを許可し、ページを再読み込みしてください。';
+      default:
+        return 'この環境ではブラウザのマイク権限を判定できないため、録音開始時のダイアログで許可してください。';
+    }
+  }, [micPermission, selectedAudioDeviceLabel]);
 
   // Batch States
   const [files, setFiles] = useState<FileList | null>(null);
@@ -162,6 +215,8 @@ export default function App() {
   const [jobResults, setJobResults] = useState<FileResult[]>([]);
   const [jobError, setJobError] = useState<string | null>(null);
   const [jobSummary, setJobSummary] = useState<JobSummary | null>(null);
+  const [jobHistory, setJobHistory] = useState<JobHistoryEntry[]>([]);
+  const [jobHistoryError, setJobHistoryError] = useState<string | null>(null);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
 
   // Results Filter States
@@ -251,11 +306,12 @@ export default function App() {
     () => Array.from(new Set(jobResults.map((r) => r.provider))),
     [jobResults]
   );
+  const selectedHistoryEntry = jobHistory.find((entry) => entry.jobId === lastJobId);
 
-  const selectedProviderAvailable = useMemo(
-    () => providers.find((p) => p.id === provider)?.available ?? true,
-    [provider, providers]
-  );
+  const selectedProvider = useMemo(() => providers.find((p) => p.id === provider), [provider, providers]);
+  const selectedProviderAvailable = selectedProvider?.available ?? true;
+  const selectedProviderStreamingReady = selectedProviderAvailable && (selectedProvider?.supportsStreaming ?? true);
+  const selectedProviderBatchReady = selectedProviderAvailable && (selectedProvider?.supportsBatch ?? true);
 
   useEffect(() => {
     if (resultsProviderFilter !== 'all' && !resultProviderOptions.includes(resultsProviderFilter)) {
@@ -330,15 +386,76 @@ export default function App() {
     [lastJobId]
   );
 
+  const loadJobData = useCallback(
+    async (jobId: string) => {
+      if (!jobId) return;
+      try {
+        const resultRes = await fetch(`${API_BASE}/api/jobs/${jobId}/results`);
+        if (!resultRes.ok) {
+          throw new Error('ジョブ結果の取得に失敗しました');
+        }
+        const resultJson = (await resultRes.json()) as FileResult[];
+        setJobResults(resultJson);
+        const summaryRes = await fetch(`${API_BASE}/api/jobs/${jobId}/summary`);
+        if (summaryRes.ok) {
+          setJobSummary((await summaryRes.json()) as JobSummary);
+        } else {
+          setJobSummary(null);
+        }
+        setJobHistoryError(null);
+        setLastJobId(jobId);
+      } catch (error) {
+        console.error('failed to load job results', error);
+        setJobSummary(null);
+        setJobHistoryError((error as Error).message);
+      }
+    },
+    [setJobResults, setJobSummary, setLastJobId, setJobHistoryError]
+  );
+
+  const refreshJobHistory = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs`);
+      if (!res.ok) {
+        throw new Error('ジョブ履歴の取得に失敗しました');
+      }
+      const data = (await res.json()) as JobHistoryEntry[];
+      setJobHistory(data);
+      setJobHistoryError(null);
+    } catch (error) {
+      console.warn('job history refresh failed', error);
+      setJobHistoryError((error as Error).message);
+    }
+  }, [setJobHistory, setJobHistoryError]);
+
   // History Fetch
   useEffect(() => {
     if (tab !== 'results') return;
     refreshLatencyHistory().catch((err) => console.warn('latency history fetch failed', err));
-  }, [tab, refreshLatencyHistory]);
+    void refreshJobHistory();
+  }, [tab, refreshLatencyHistory, refreshJobHistory]);
+
+  useEffect(() => {
+    if (tab !== 'results') return;
+    if (jobHistory.length === 0) return;
+    const firstJobId = jobHistory[0].jobId;
+    if (lastJobId && jobHistory.some((entry) => entry.jobId === lastJobId)) return;
+    void loadJobData(firstJobId);
+  }, [tab, jobHistory, lastJobId, loadJobData]);
 
   const startRealtime = async () => {
-    if (!selectedProviderAvailable) {
-      setRealtimeError('選択したプロバイダは利用できません');
+    if (!selectedProviderStreamingReady) {
+      setRealtimeError('このプロバイダはRealtime非対応か現在利用できません（Batchタブを使用してください）');
+      return;
+    }
+    if (micPermission === 'denied') {
+      setRealtimeError(
+        'ブラウザのマイク権限が拒否されています。サイト設定でこのサイトを許可し、ページを再読み込みしてから再試行してください。'
+      );
+      return;
+    }
+    if (!hasDevices) {
+      setRealtimeError('録音可能な入力デバイスが見つかりません。OS/ブラウザでマイクが接続されているか確認してください。');
       return;
     }
     setRealtimeError(null);
@@ -347,7 +464,13 @@ export default function App() {
     realtimeRetry.reset();
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioConstraints: MediaTrackConstraints = {};
+      if (selectedAudioDeviceId) {
+        audioConstraints.deviceId = { exact: selectedAudioDeviceId };
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedAudioDeviceId ? audioConstraints : true,
+      });
       const mediaRecorder = new MediaRecorder(stream, {
         mimeType: 'audio/webm; codecs=opus',
         audioBitsPerSecond: 64_000,
@@ -439,6 +562,15 @@ export default function App() {
 
     } catch (error) {
       console.error(error);
+      if (error instanceof DOMException && error.name === 'NotAllowedError') {
+        void refreshMicPermission();
+        const permissionMessage =
+          micPermission === 'denied'
+            ? 'ブラウザのマイク権限が拒否されています。サイト設定で許可したうえで再試行してください。'
+            : 'マイク許可のダイアログが拒否またはキャンセルされました。もう一度「録音開始」を押して許可してください。';
+        setRealtimeError(permissionMessage);
+        return;
+      }
       setRealtimeError('マイクにアクセスできませんでした');
     }
   };
@@ -453,8 +585,8 @@ export default function App() {
   };
 
   const submitBatch = async () => {
-    if (!selectedProviderAvailable) {
-      setJobError('選択したプロバイダは利用できません');
+    if (!selectedProviderBatchReady) {
+      setJobError('このプロバイダはBatchで利用できないか、現在利用不可です');
       return;
     }
     if (isBatchRunning) return;
@@ -492,7 +624,11 @@ export default function App() {
     setJobSummary(null);
 
     const form = new FormData();
-    for (const file of Array.from(files)) form.append('files', file, file.name);
+    for (const file of Array.from(files)) {
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+      const uploadName = relativePath && relativePath.length > 0 ? relativePath : file.name;
+      form.append('files', file, uploadName);
+    }
     form.append('provider', provider);
     form.append('lang', lang);
     if (manifestPayload) form.append('ref_json', manifestPayload);
@@ -543,14 +679,8 @@ export default function App() {
             clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
           }
-          const resultRes = await fetch(`${API_BASE}/api/jobs/${jobId}/results`);
-          const resultJson = (await resultRes.json()) as FileResult[];
-          setJobResults(resultJson);
-          setLastJobId(jobId);
-
-          const summaryRes = await fetch(`${API_BASE}/api/jobs/${jobId}/summary`);
-          if (summaryRes.ok) setJobSummary((await summaryRes.json()) as JobSummary);
-
+          await loadJobData(jobId);
+          await refreshJobHistory();
           setIsBatchRunning(false);
         }
       } catch (err) {
@@ -601,6 +731,42 @@ export default function App() {
                 </select>
               </div>
               <div className="control-group">
+                <label>入力マイク</label>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <select
+                    value={selectedAudioDeviceId ?? ''}
+                    disabled={audioDevicesLoading || !hasDevices}
+                    onChange={(e) => setSelectedAudioDeviceId(e.target.value || null)}
+                  >
+                    {audioDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      refreshAudioDevices();
+                      setRealtimeError(null);
+                    }}
+                    disabled={audioDevicesLoading}
+                    style={{ whiteSpace: 'nowrap' }}
+                  >
+                    <Icons.Refresh /> 更新
+                  </button>
+                </div>
+                {!audioDevicesLoading && !hasDevices && (
+                  <div className="muted" style={{ fontSize: '0.75rem' }}>
+                    マイクが検出されません。OS/ブラウザ設定で接続済みの入力を選んでください。
+                  </div>
+                )}
+                {audioDevicesError && (
+                  <div className="muted" style={{ fontSize: '0.75rem' }}>{audioDevicesError}</div>
+                )}
+              </div>
+              <div className="control-group">
                 <label>言語 (Language)</label>
                 <input value={lang} onChange={(e) => setLang(e.target.value)} />
               </div>
@@ -631,6 +797,34 @@ export default function App() {
                   {isStreaming ? <><Icons.Stop /> 録音停止</> : <><Icons.Mic /> 録音開始</>}
                 </button>
               </div>
+            </div>
+            <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {micPermission === 'granted' ? <Icons.Check /> : <Icons.Alert />}
+                <strong>マイク権限: {micPermissionLabel}</strong>
+                {micPermission !== 'granted' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRealtimeError(null);
+                      void refreshMicPermission();
+                    }}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      fontSize: '0.75rem',
+                      color: 'var(--primary-hover)',
+                      textDecoration: 'underline',
+                      cursor: 'pointer',
+                      marginLeft: '0.5rem',
+                    }}
+                  >
+                    状態を再確認
+                  </button>
+                )}
+              </div>
+              <div>{micPermissionHint}</div>
             </div>
 
             {realtimeRetry.active && realtimeRetry.nextInMs !== null && (
@@ -833,6 +1027,38 @@ export default function App() {
            {tab === 'results' && (
              <div className="card controls-grid" style={{ alignItems: 'center', marginBottom: '2rem' }}>
                <div className="control-group">
+                 <label>ジョブ履歴</label>
+                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                   <select
+                     value={lastJobId ?? ''}
+                     onChange={(e) => {
+                       const value = e.target.value;
+                       if (value) {
+                         loadJobData(value);
+                       }
+                     }}
+                     style={{ flex: 1, minWidth: 200 }}
+                   >
+                     <option value="" disabled>
+                       {jobHistory.length === 0 ? '履歴がありません' : '履歴から選択'}
+                     </option>
+                     {jobHistory.map((entry) => (
+                       <option key={entry.jobId} value={entry.jobId}>
+                         {`${entry.provider} (${entry.total}件) ${new Date(entry.updatedAt).toLocaleString()}`}
+                       </option>
+                     ))}
+                   </select>
+                   <button className="btn btn-ghost" onClick={() => refreshJobHistory()} disabled={isBatchRunning}>
+                     更新
+                   </button>
+                 </div>
+                 {jobHistoryError && (
+                   <div className="muted" style={{ fontSize: '0.75rem', marginTop: 4 }}>
+                     {jobHistoryError}
+                   </div>
+                 )}
+               </div>
+               <div className="control-group">
                  <label>プロバイダーでフィルタ</label>
                  <select value={resultsProviderFilter} onChange={(e) => setResultsProviderFilter(e.target.value)}>
                     <option value="all">全てのプロバイダー</option>
@@ -848,7 +1074,14 @@ export default function App() {
 
            {((tab === 'batch' && jobSummary) || tab === 'results') && (
              <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
-               <div className="muted">最新ジョブID: {lastJobId ?? 'なし'}</div>
+               <div className="muted">
+                 最新ジョブID: {lastJobId ?? 'なし'}
+                 {selectedHistoryEntry && (
+                   <span style={{ marginLeft: 8 }}>
+                     ({selectedHistoryEntry.provider} · {new Date(selectedHistoryEntry.updatedAt).toLocaleString()})
+                   </span>
+                 )}
+               </div>
                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                  <button className="btn btn-ghost" onClick={() => exportResults('csv')} disabled={!lastJobId}><Icons.Download /> CSV出力</button>
                  <button className="btn btn-ghost" onClick={() => exportResults('json')} disabled={!lastJobId}><Icons.Download /> JSON出力</button>

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { parseBatchRequest, HttpError } from './server.js';
 
 const availability = [
-  { id: 'mock', available: true, implemented: true },
-  { id: 'deepgram', available: false, implemented: true, reason: 'no key' },
+  { id: 'mock', available: true, implemented: true, supportsStreaming: true, supportsBatch: true },
+  { id: 'deepgram', available: false, implemented: true, supportsStreaming: true, supportsBatch: true, reason: 'no key' },
 ] as const;
 
 const baseReq = () =>

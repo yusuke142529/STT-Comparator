@@ -143,10 +143,10 @@ describe('handleStreamConnection', () => {
     await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
 
     ws.emit('message', Buffer.from(JSON.stringify({ type: 'config' })), false);
+    ws.emit('message', Buffer.from([1, 2, 3]), true);
     for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
       await Promise.resolve();
     }
-    state.passthrough.emit('data', Buffer.from([1, 2, 3]));
 
     vi.advanceTimersByTime(25);
 

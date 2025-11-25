@@ -23,7 +23,23 @@ export async function handleStreamConnection(
 ) {
   const config = await loadConfig();
   const adapter = getAdapter(provider);
-  const transcoder = spawnPcmTranscoder(config.audio);
+  let transcoder: ReturnType<typeof spawnPcmTranscoder> | null = null;
+  const ensureTranscoder = () => {
+    if (transcoder) return transcoder;
+    const spawned = spawnPcmTranscoder(config.audio);
+    transcoder = spawned;
+    transcoder.stream.on('data', (chunk: Buffer) => {
+      void flushChunk(chunk);
+    });
+    transcoder.onError((err) => handleFatal(err));
+    transcoder.onClose((code) => {
+      if (closed) return;
+      if (typeof code === 'number' && code !== 0) {
+        handleFatal(new Error(`ffmpeg exited with code ${code}`));
+      }
+    });
+    return transcoder;
+  };
   const pcmQueue: Buffer[] = [];
   let queuedBytes = 0;
   let sessionStarted = false;
@@ -79,22 +95,11 @@ export async function handleStreamConnection(
     lastAudioSentAt = now;
   };
 
-  transcoder.stream.on('data', (chunk: Buffer) => {
-    void flushChunk(chunk);
-  });
-  transcoder.onError((err) => handleFatal(err));
-  transcoder.onClose((code) => {
-    if (closed) return;
-    if (typeof code === 'number' && code !== 0) {
-      handleFatal(new Error(`ffmpeg exited with code ${code}`));
-    }
-  });
-
   function handleFatal(err: Error) {
     if (closed) return;
     closed = true;
     sendJson({ type: 'error', message: err.message });
-    transcoder.end();
+    transcoder?.end();
     ws.close();
   }
 
@@ -102,7 +107,7 @@ export async function handleStreamConnection(
     void (async () => {
       if (!sessionStarted && isBinary) {
         sendJson({ type: 'error', message: 'config message required before audio' });
-        transcoder.end();
+        transcoder?.end();
         ws.close();
         return;
       }
@@ -149,7 +154,7 @@ export async function handleStreamConnection(
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Invalid initial config message';
           sendJson({ type: 'error', message });
-          transcoder.end();
+          transcoder?.end();
           ws.close();
           return;
         }
@@ -157,14 +162,15 @@ export async function handleStreamConnection(
 
       if (isBinary) {
         const buffer = normalizeRawData(data);
-        await transcoder.input(buffer);
+        const activeTranscoder = ensureTranscoder();
+        await activeTranscoder.input(buffer);
       }
     })();
   });
 
   ws.on('close', () => {
     void (async () => {
-      transcoder.end();
+      transcoder?.end();
       await controller?.end();
       await controller?.close();
       await persistLatency(

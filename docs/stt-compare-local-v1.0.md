@@ -82,7 +82,7 @@
 ```
 Web UI (React/TS) -> WS(JSON config + binary webm/opus) -> Local Node Server
 Node Server: Transmux (FFmpeg), Router, Scoring, Storage (JSONL/SQLite), CSV/JSON export
-Adapters: deepgram（実装済） / mock（ローカル確認用） / 他クラウドは任意拡張（デフォルト無効）
+Adapters: deepgram（実装済） / local_whisper（Batchのみ） / whisper_streaming（Realtime/Batch） / mock（ローカル確認/テスト用のスタブ。デフォルト設定には含めていない）。他クラウドは任意拡張（デフォルト無効）
 ```
 
 ## 7. モジュール構成と責務
@@ -163,8 +163,9 @@ Adapters: deepgram（実装済） / mock（ローカル確認用） / 他クラ�
 - items[].audio はアップロード files[] のファイル名と一致させる。マッピング不可は警告/エラー。
 
 ## 10. 型仕様（TypeScript）
-- ProviderId: 'google' | 'aws' | 'azure' | 'deepgram' | 'revai' | 'speechmatics' | 'openai' | 'local_whisper' | 'nvidia_riva' | 'mock'
-  - ※ v1.0 デフォルトで有効なのは `mock` と `deepgram` のみ。他は拡張用の型定義。
+- ProviderId: 'google' | 'aws' | 'azure' | 'deepgram' | 'revai' | 'speechmatics' | 'openai' | 'local_whisper' | 'nvidia_riva' | 'whisper_streaming' | 'mock'
+  - v1.0 デフォルト: `deepgram`, `local_whisper`, `whisper_streaming`（ローカル常駐 WS/HTTP サーバ, Streaming/Batch 両対応）。`mock` はローカル検証やテスト用途で必要に応じて追加してください。その他は拡張用。
+  - `whisper_streaming`: faster-whisper-server 等のローカル常駐エンドポイントを前提。WS 初期メッセージで language/task/model を送信し、partial/final を受信する。
 - StreamingOptions: language, sampleRateHz(16000), encoding 'linear16', enableInterim?, contextPhrases?
 - TranscriptWord, PartialTranscript (timestamp, channel 'mic'|'file')
 - PunctuationPolicy: 'none' | 'basic' | 'full'; TranscriptionOptions: enableVad?, punctuationPolicy?, dictionaryPhrases?, parallel?
@@ -181,6 +182,9 @@ Adapters: deepgram（実装済） / mock（ローカル確認用） / 他クラ�
 ```
 PORT=5173
 DEEPGRAM_API_KEY=dg_xxx        # 現行デフォルトで必要なのはこれのみ
+WHISPER_WS_URL=ws://localhost:8000/v1/audio/transcriptions
+WHISPER_HTTP_URL=http://localhost:8000/v1/audio/transcriptions
+WHISPER_MODEL=small            # faster-whisper-server へ渡すモデル名
 # 以下は拡張時に使用（デフォルトでは未使用）
 # AZURE_SPEECH_KEY=...
 # AZURE_SPEECH_REGION=...
@@ -195,9 +199,10 @@ DEEPGRAM_API_KEY=dg_xxx        # 現行デフォルトで必要なのはこれ�
   "audio": { "targetSampleRate": 16000, "targetChannels": 1, "chunkMs": 250 },
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": true },
   "storage": { "driver": "jsonl", "path": "./runs/2025-11-19" }, // driver は jsonl または sqlite
-  "providers": ["mock", "deepgram"] // ローカル用途の現行デフォルト。追加は任意拡張
+  "providers": ["deepgram", "local_whisper", "whisper_streaming"] // ローカル用途の現行デフォルト（`mock` は任意追加）
 }
 ```
+- `providerHealth.refreshMs` を指定すると `/api/providers` のヘルスチェック結果を再計算する間隔（ミリ秒）を調整できます。デフォルト 5000 によりローカルの `whisper_streaming` 等を起動した直後でも数秒で「利用可能」へ切り替わるようになり、同エンドポイントは TTL 内でキャッシュを再利用して過剰なヘルスチェックを防ぎます。即時再評価が必要なときは `/api/admin/reload-config` を叩いてください。
 
 ## 12. 音声処理ポリシー
 - Realtime: webm/opus、Batch: wav/mp3/mp4。サーバで PCM S16LE 16k mono に統一。
@@ -210,7 +215,7 @@ DEEPGRAM_API_KEY=dg_xxx        # 現行デフォルトで必要なのはこれ�
 - 出力: 平均/p50/p95 を集計し UI と CSV/JSON で可視化。再現性確保。
 
 ## 14. UI仕様（要点）
-- Realtime: プロバイダ選択（現行は Mock/Deepgram）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。
+- Realtime: プロバイダ選択（現行は Deepgram と Whisper Streaming。local_whisper は Batch のみ対応）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。
 - Batch Evaluate: ファイルドロップ、参照マニフェスト、並列度（options.parallel）、VAD/句読点/辞書入力、Run、進捗バー、結果テーブル、CSV/JSON DL。
 - Results: 最新ジョブの p50/p95 要約と per-file テーブル（provider/cer/wer/rtf/latency）。将来的な比較グラフは拡張範囲。
 - 操作: マイク許可必須、ストリーミング中は Stop 常設、プロバイダ切替時はセッションを安全終了。
@@ -328,7 +333,8 @@ latency: 350ms (interim), 900ms (final) | session: 00:02:31
 ## 26. 付録C：Adapter 実装ガイド（概要）
 - startStreaming(opts): encoding は 'linear16' 固定。ベンダ仕様で接続し PartialTranscript に正規化。sendAudio の引数は PCM 生バイト。
 - transcribeFileFromPCM(pcm, opts): 必要なら一時ファイル/アップロード。processingTimeMs を計測して返却。
-- local_whisper / nvidia_riva: ローカル常駐サーバへの接続。GPU要件は README に明記。
+- local_whisper: Python版 Whisper へのローカル接続。v1 では Batch のみ対応（Streaming 非対応）。モデル/デバイス要件は README に明記。
+- nvidia_riva: ローカル常駐サーバへの接続。GPU要件は README に明記。
 
 ## 27. 付録D：サンプル正規化ロジック
 - 日本語: NFKC → 句読点除去 → 空白除去 → CER

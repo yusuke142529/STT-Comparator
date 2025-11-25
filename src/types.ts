@@ -1,14 +1,18 @@
-export type ProviderId =
-  | 'google'
-  | 'aws'
-  | 'azure'
-  | 'deepgram'
-  | 'revai'
-  | 'speechmatics'
-  | 'openai'
-  | 'local_whisper'
-  | 'nvidia_riva'
-  | 'mock';
+export const PROVIDER_IDS = [
+  'google',
+  'aws',
+  'azure',
+  'deepgram',
+  'revai',
+  'speechmatics',
+  'openai',
+  'local_whisper',
+  'nvidia_riva',
+  'whisper_streaming',
+  'mock',
+] as const;
+
+export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 export interface StreamingOptions {
   language: string;
@@ -182,6 +186,9 @@ export interface AppConfig {
   };
   ws?: {
     maxPcmQueueBytes?: number;
+  };
+  providerHealth?: {
+    refreshMs?: number;
   };
 }
 

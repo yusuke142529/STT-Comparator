@@ -15,7 +15,7 @@
 
 ```
 ├── src/                  # ローカルサーバ（Express/WS）
-│   ├── adapters/         # Provider Adapter 実装（mock + deepgram）
+│   ├── adapters/         # Provider Adapter 実装（deepgram / local_whisper / whisper_streaming。mock は任意のスタブ）
 │   ├── jobs/             # バッチ実行・スコアリング
 │   ├── scoring/          # CER/WER/RTF と正規化
 │   ├── storage/          # JSONL/SQLite ドライバ, CSVエクスポータ
@@ -44,7 +44,43 @@
   cp .env.example .env
   ```
   - Deepgram を有効化するには `.env` に `DEEPGRAM_API_KEY` を入れてサーバを再起動するだけでOK。既定ポートは 4100（`SERVER_PORT` で変更可能、フロントは `VITE_API_BASE_URL` と Vite proxy がそれに追従します）。
-4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `mock` と `deepgram`）。必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。
+4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `local_whisper`, `whisper_streaming`。手元検証用に `mock` を追加することもできます）。必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。
+  - `providerHealth.refreshMs` で `/api/providers` のヘルスチェック結果のキャッシュ期間（ミリ秒）を調整できます。デフォルト 5000ms により、`whisper_streaming` などのローカル ASR サービスを起動した直後でも UI が利用可能に切り替えられ、必要があれば `/api/admin/reload-config` を呼んで即座に再評価させられます。
+
+### Whisper Streaming（faster-whisper-server, ローカル常駐）
+
+- Docker 1コマンドで常駐サーバを起動できます（CPU 版の例、ポート 8000 固定）:
+  ```bash
+  docker run --rm -p 8000:8000 fedirz/faster-whisper-server:latest-cpu
+  # GPU を使う場合は :latest-cuda イメージを選択
+  ```
+- .env に以下を追加（`cp .env.example .env` 済みの場合は値を書き換えるだけ）:
+  ```bash
+  WHISPER_WS_URL=ws://localhost:8000/v1/audio/transcriptions
+  WHISPER_HTTP_URL=http://localhost:8000/v1/audio/transcriptions
+  WHISPER_MODEL=small   # 任意モデル名
+  ```
+  - `whisper_streaming` Adapter は faster-whisper-server が WebSocket/HTTP をリッスン可能になるまでヘルスチェック（デフォルト: `http://localhost:8000/health`）をポーリングし、それが完了してからソケット接続または HTTP リクエストを開始します。必要に応じて以下の追加環境変数でポーリング先・タイムアウト・間隔を調整できます（全て省略または 0 にするとヘルスチェックを無効化します）。
+    ```bash
+    WHISPER_STREAMING_READY_URL=http://localhost:8000/health
+    WHISPER_STREAMING_READY_TIMEOUT_MS=90000
+    WHISPER_STREAMING_READY_INTERVAL_MS=1000
+    ```
+- `whisper_streaming` は **Realtime / Batch の両方に対応** します。UI/Batch API から選択すると PCM(16k mono) をローカルサーバへ送信し、partial/final の文字起こしを受信します。
+- Deepgram など外部 API と同等にレイテンシ計測・公平性指標（p50/p95）が動作します。サーバ未起動時は `/api/providers` で unavailable 理由が返り、UI では選択不可・警告表示になります。
+
+### ローカル Whisper (Python) を使う
+
+- 依存: Python 3.10–3.13 推奨（本リポでは 3.11 を例示）、`ffmpeg` は既に必須。
+- セットアップ例（リポジトリ直下で実行）
+  ```bash
+  python3.11 -m venv .venv
+  source .venv/bin/activate
+  pip install --upgrade pip setuptools wheel
+  pip install git+https://github.com/openai/whisper.git
+  ```
+- サーバはデフォルトで `.venv/bin/python3` を優先し、`WHISPER_PYTHON` を指定すれば別 Python を使えます。モデル/デバイスは環境変数で調整できます（例: `WHISPER_MODEL=small`, `WHISPER_DEVICE=cpu`）。
+- `local_whisper` は **Batch のみ対応** です（Realtime は非対応）。Realtime を試す場合は Deepgram 等のストリーミング対応プロバイダを選択してください。
 
 ## 実行
 
@@ -63,7 +99,7 @@ UI ビルド後は `public/` に生成されたファイルを Express が配信
 - `GET /api/jobs/:jobId/results?format=csv|json` — CER/WER/RTF を含むレコードを JSON/CSV で返却。
 - `WS /ws/stream?provider=<id>&lang=<bcp47>` — 接続直後に `StreamingConfigMessage` を送信 → 以降は webm/opus バイナリ（MediaRecorder）を送る。
 - UI では punctuation policy（none/basic/full）を選択して送信でき、プロバイダ側の句読点挿入挙動を条件として比較可能。
-- `GET /api/providers` — 現在のプロバイダ有効/無効状態を返却（Deepgram キー未設定などを UI で案内）。
+- `GET /api/providers` — 現在のプロバイダ有効/無効状態を返却（Deepgram キー未設定などを UI で案内）。この API は現在のプロバイダヘルスを逐次再評価し `providerHealth.refreshMs` ミリ秒ごとにキャッシュを更新するため、ローカルの `whisper_streaming` サーバを起動した後でも数秒以内に UI に「利用可能」と反映されます。
 - `GET /api/realtime/latency?limit=20` — 直近の realtime セッションのレイテンシ集計（avg/p50/p95/min/max, count, provider/lang）を返却。
 
 詳細なスキーマは仕様書（`src/types.ts`）と README のリンク箇所を参照してください。
@@ -76,8 +112,9 @@ UI ビルド後は `public/` に生成されたファイルを Express が配信
 
 ## Adapter 雛形
 
-- `src/adapters/mock.ts` — ローカルで UI/ストレージの疎通確認用。
+- `src/adapters/mock.ts` — ローカル確認/テスト用のスタブ。通常は `config.json` の providers に含まれませんが、必要なら手動追加できます。
 - `src/adapters/deepgram.ts` — Deepgram 公式 API 連携を実装済み。`.env` に `DEEPGRAM_API_KEY` を設定して有効化。
+- `src/adapters/whisperStreaming.ts` — ローカル常駐の faster-whisper-server (WS/HTTP) と連携する Streaming/Batch 両対応アダプタ。
 - Adapter を増やす際は `src/adapters/index.ts` に登録し、`config.json` の `providers` に ID を追加します。
 
 ## サンプル manifest

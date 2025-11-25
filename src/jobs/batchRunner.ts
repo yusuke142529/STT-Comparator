@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
-import { Readable } from 'node:stream';
+import type { Readable } from 'node:stream';
 import { once } from 'node:events';
 import type {
   BatchJobFileResult,
@@ -19,6 +19,7 @@ import { convertToPcmReadable } from '../utils/ffmpeg.js';
 import { cer, rtf, wer } from '../scoring/metrics.js';
 import { matchManifestItem } from '../utils/manifest.js';
 import os from 'node:os';
+import { JobHistory } from './jobHistory.js';
 
 interface FileInput {
   originalname: string;
@@ -45,7 +46,10 @@ export class BatchRunner {
   private jobs = new Map<string, JobState>();
   private cleanupTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(private storage: StorageDriver<BatchJobFileResult>) {}
+  constructor(
+    private storage: StorageDriver<BatchJobFileResult>,
+    private readonly jobHistory: JobHistory
+  ) {}
 
   async init(): Promise<void> {
     await this.storage.init();
@@ -102,7 +106,8 @@ export class BatchRunner {
   private async processJob(job: JobState): Promise<void> {
     const config = await loadConfig();
     const adapter = getAdapter(job.provider);
-    const maxParallel = Math.min(os.cpus().length, config.jobs?.maxParallel ?? 4);
+    const cpuCount = Math.max(1, os.cpus().length || 1);
+    const maxParallel = Math.min(cpuCount, config.jobs?.maxParallel ?? cpuCount);
     const requestedParallel = job.options?.parallel ?? 1;
     const concurrency = Math.min(Math.max(1, requestedParallel), maxParallel);
     let cursor = 0;
@@ -195,6 +200,7 @@ export class BatchRunner {
       };
       job.results.push(score);
       await this.storage.append(score);
+      this.jobHistory.recordRow(score);
       job.done += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown adapter error';

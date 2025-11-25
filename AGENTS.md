@@ -13,7 +13,7 @@
 ## Environment & Config
 - Node 20+, pnpm 10+, FFmpeg in PATH (or `@ffmpeg-installer/ffmpeg`). Chrome/Edge を主対象（Safari は v1.0 未対応）。
 - Copy `.env.example` → `.env`; set provider keys, `SERVER_PORT`/`PORT` (default 4100).
-- `config.json`: audio 16k/mono/250ms、normalizationプリセット、storage driver/path、providers。現行バンドルは `mock` と `deepgram` のみ（ローカル用途）。追加実装は拡張時に `src/adapters/index.ts` へ登録。storage.driver は `jsonl` または `sqlite`（better-sqlite3実装済）。
+- `config.json`: audio 16k/mono/250ms、normalizationプリセット、storage driver/path、providers。現行バンドルは `deepgram`, `local_whisper`, `whisper_streaming`（`mock` は必要に応じて追加）。追加実装は拡張時に `src/adapters/index.ts` へ登録。storage.driver は `jsonl` または `sqlite`（better-sqlite3実装済）。
 
 ## Build, Test, and Development
 - Install: `pnpm install` (root) + `pnpm --filter stt-comparator-client install`.

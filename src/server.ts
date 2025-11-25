@@ -7,17 +7,19 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import multer from 'multer';
-import dotenv from 'dotenv';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { handleStreamConnection } from './ws/streamHandler.js';
 import { logger } from './logger.js';
 import { createRealtimeStorage, createStorage } from './storage/index.js';
 import { loadConfig, reloadConfig } from './config.js';
+import { loadEnvironment, reloadEnvironment } from './utils/env.js';
 import { BatchRunner } from './jobs/batchRunner.js';
+import { JobHistory } from './jobs/jobHistory.js';
 import { parseManifest } from './utils/manifest.js';
 import { toCsv } from './storage/csvExporter.js';
 import { summarizeJob } from './utils/summary.js';
-import { computeProviderAvailability, requireProviderAvailable } from './utils/providerStatus.js';
+import { requireProviderAvailable } from './utils/providerStatus.js';
+import { ProviderAvailabilityCache } from './utils/providerAvailabilityCache.js';
 import { getAdapter } from './adapters/index.js';
 import { transcriptionOptionsSchema } from './validation.js';
 import type {
@@ -27,8 +29,9 @@ import type {
   TranscriptionOptions,
   EvaluationManifest,
 } from './types.js';
+import type { ProviderAvailability } from './utils/providerStatus.js';
 
-dotenv.config();
+loadEnvironment();
 
 export class HttpError extends Error {
   statusCode: number;
@@ -51,7 +54,7 @@ interface ParsedBatchRequest {
 
 export function parseBatchRequest(
   req: express.Request,
-  providerAvailability: ReturnType<typeof computeProviderAvailability>
+  providerAvailability: ProviderAvailability[]
 ): ParsedBatchRequest {
   const files = (req.files as Express.Multer.File[]) ?? [];
   const provider = req.body.provider as ProviderId;
@@ -64,7 +67,7 @@ export function parseBatchRequest(
   }
 
   try {
-    requireProviderAvailable(providerAvailability, provider);
+    requireProviderAvailable(providerAvailability, provider, 'batch');
   } catch (err) {
     const statusCode = (err as any).statusCode ?? 400;
     throw new HttpError(statusCode, (err as Error).message, { providers: providerAvailability });
@@ -140,7 +143,9 @@ async function bootstrap() {
   const wss = new WebSocketServer({ server, path: '/ws/stream' });
 
   let config = await loadConfig();
-  let providerAvailability = computeProviderAvailability(config);
+  const providerHealthRefreshMs = config.providerHealth?.refreshMs ?? 5_000;
+  const providerStatusCache = new ProviderAvailabilityCache(config, providerHealthRefreshMs);
+  const initialProviders = await providerStatusCache.get();
   const retention = {
     retentionMs: config.storage.retentionDays
       ? config.storage.retentionDays * 24 * 60 * 60 * 1000
@@ -149,10 +154,12 @@ async function bootstrap() {
   } as const;
   const storage = createStorage(config.storage.driver, config.storage.path, retention);
   const realtimeLatencyStore = createRealtimeStorage(config.storage.driver, config.storage.path, retention);
-  const batchRunner = new BatchRunner(storage);
+  const jobHistory = new JobHistory(storage);
+  await jobHistory.init();
+  const batchRunner = new BatchRunner(storage, jobHistory);
   await batchRunner.init();
   await realtimeLatencyStore.init();
-  logger.info({ event: 'providers_status', providers: providerAvailability });
+  logger.info({ event: 'providers_status', providers: initialProviders });
 
   const allowedOrigins = parseAllowedOrigins();
   app.use(
@@ -196,16 +203,28 @@ async function bootstrap() {
     res.json({ audio: { chunkMs: config.audio.chunkMs } });
   });
 
-  app.get('/api/providers', (_req, res) => {
-    res.json(providerAvailability);
+  app.get('/api/providers', async (_req, res, next) => {
+    try {
+      const providers = await providerStatusCache.get();
+      res.json(providers);
+    } catch (error) {
+      next(error as Error);
+    }
   });
 
   app.post('/api/admin/reload-config', async (_req, res, next) => {
     try {
+      reloadEnvironment();
       reloadConfig();
       config = await loadConfig();
-      providerAvailability = computeProviderAvailability(config);
-      res.json({ status: 'ok', providers: providerAvailability, note: 'storage driver/path are not re-instantiated; restart required to change storage settings' });
+      const refreshedRefreshMs = config.providerHealth?.refreshMs ?? 5_000;
+      providerStatusCache.updateConfig(config, refreshedRefreshMs);
+      const refreshedProviders = await providerStatusCache.refresh();
+      res.json({
+        status: 'ok',
+        providers: refreshedProviders,
+        note: 'storage driver/path are not re-instantiated; restart required to change storage settings',
+      });
     } catch (error) {
       next(error as Error);
     }
@@ -213,6 +232,7 @@ async function bootstrap() {
 
   app.post('/api/jobs/transcribe', upload.array('files'), async (req, res, next) => {
     try {
+      const providerAvailability = await providerStatusCache.get();
       const parsed = parseBatchRequest(req, providerAvailability);
       const adapter = getAdapter(parsed.provider);
       if (!adapter.supportsBatch) {
@@ -261,6 +281,15 @@ async function bootstrap() {
     res.json(results);
   });
 
+  app.get('/api/jobs', async (_req, res, next) => {
+    try {
+      const entries = await jobHistory.list();
+      res.json(entries);
+    } catch (error) {
+      next(error as Error);
+    }
+  });
+
   app.get('/api/jobs/:jobId/summary', async (req, res) => {
     try {
       const results = await batchRunner.getResults(req.params.jobId);
@@ -288,30 +317,46 @@ async function bootstrap() {
     const lang = url.searchParams.get('lang') ?? 'ja-JP';
     const origin = req.headers.origin;
     const allowedOrigins = parseAllowedOrigins();
-    if (!isOriginAllowed(origin, allowedOrigins)) {
-      ws.send(JSON.stringify({ type: 'error', message: 'origin not allowed' }));
+    const sendWsError = (message: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'error', message }));
+      }
       ws.close();
+    };
+
+    if (!isOriginAllowed(origin, allowedOrigins)) {
+      sendWsError('origin not allowed');
       return;
     }
     if (!provider) {
-      ws.send(JSON.stringify({ type: 'error', message: 'provider query param is required' }));
-      ws.close();
+      sendWsError('provider query param is required');
       return;
     }
-    try {
-      requireProviderAvailable(providerAvailability, provider);
-    } catch (err) {
-      ws.send(JSON.stringify({ type: 'error', message: (err as Error).message }));
-      ws.close();
-      return;
-    }
-    handleStreamConnection(ws, provider, lang, realtimeLatencyStore).catch((error) => {
+
+    (async () => {
+      const providerAvailability = await providerStatusCache.get();
+      try {
+        requireProviderAvailable(providerAvailability, provider, 'streaming');
+      } catch (err) {
+        sendWsError((err as Error).message);
+        return;
+      }
+
+      try {
+        await handleStreamConnection(ws, provider, lang, realtimeLatencyStore);
+      } catch (error) {
+        logger.error({ event: 'ws_handler_error', message: error.message });
+        sendWsError(error.message ?? 'streaming handler error');
+      }
+    })().catch((error) => {
       logger.error({ event: 'ws_handler_error', message: error.message });
-      ws.close();
+      sendWsError(error.message ?? 'streaming connection error');
     });
   });
 
-  const port = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 4100);
+  const port = Number(
+    process.env.TEST_SERVER_PORT ?? process.env.SERVER_PORT ?? process.env.PORT ?? 4100
+  );
   server.listen(port, () => {
     logger.info({ event: 'server_started', port });
     console.log(`Server listening on http://localhost:${port}`);

@@ -5,6 +5,68 @@ import { BaseAdapter } from './base.js';
 
 const DEEPGRAM_WS = 'wss://api.deepgram.com/v1/listen';
 const DEEPGRAM_HTTP = 'https://api.deepgram.com/v1/listen';
+const MAX_DEEPGRAM_BATCH_ATTEMPTS = 3;
+const IDLE_TIMEOUT_MS = 30_000;
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
+const BASE_RETRY_DELAY_MS = 1000;
+const MAX_RETRY_DELAY_MS = 10_000;
+
+const SUPPORTED_DEEPGRAM_LANGUAGES = [
+  'multi',
+  'bg',
+  'ca',
+  'zh',
+  'zh-CN',
+  'zh-TW',
+  'zh-HK',
+  'cs',
+  'da',
+  'da-DK',
+  'nl',
+  'en',
+  'en-US',
+  'en-AU',
+  'en-GB',
+  'en-NZ',
+  'en-IN',
+  'et',
+  'fi',
+  'nl-BE',
+  'fr',
+  'fr-CA',
+  'de',
+  'de-CH',
+  'el',
+  'hi',
+  'hu',
+  'id',
+  'it',
+  'ja',
+  'ko',
+  'ko-KR',
+  'lv',
+  'lt',
+  'ms',
+  'no',
+  'pl',
+  'pt',
+  'pt-BR',
+  'pt-PT',
+  'ro',
+  'ru',
+  'sk',
+  'es',
+  'es-419',
+  'sv',
+  'sv-SE',
+  'th',
+  'th-TH',
+  'tr',
+  'uk',
+  'vi',
+] as const;
+const SUPPORTED_DEEPGRAM_LANGUAGE_SET = new Set(SUPPORTED_DEEPGRAM_LANGUAGES);
 
 function requireApiKey(): string {
   const key = process.env.DEEPGRAM_API_KEY;
@@ -14,6 +76,64 @@ function requireApiKey(): string {
   return key;
 }
 
+function shouldRetryStatus(status: number): boolean {
+  return RETRYABLE_STATUS_CODES.has(status) || (status >= 500 && status < 600);
+}
+
+function shouldRetryError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const text = error.message.toLowerCase();
+  return (
+    error.name === 'AbortError' ||
+    text.includes('timeout') ||
+    text.includes('failed to fetch') ||
+    text.includes('network')
+  );
+}
+
+function retryDelay(attempt: number): Promise<void> {
+  const jitter = Math.floor(Math.random() * 250);
+  const delay = Math.min(BASE_RETRY_DELAY_MS * 2 ** (attempt - 1) + jitter, MAX_RETRY_DELAY_MS);
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+async function collectStream(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    stream.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('end', () => resolve());
+    stream.once('error', (err) => reject(err));
+  });
+  return Buffer.concat(chunks);
+}
+
+function normalizeDeepgramLanguage(lang: string): string {
+  const trimmed = lang.trim();
+  if (!trimmed) {
+    throw new Error('Deepgram language parameter is missing');
+  }
+  if (SUPPORTED_DEEPGRAM_LANGUAGE_SET.has(trimmed)) {
+    return trimmed;
+  }
+  const lower = trimmed.toLowerCase();
+  for (const supported of SUPPORTED_DEEPGRAM_LANGUAGES) {
+    if (supported.toLowerCase() === lower) {
+      return supported;
+    }
+  }
+  const primary = trimmed.split('-')[0];
+  for (const supported of SUPPORTED_DEEPGRAM_LANGUAGES) {
+    if (supported.toLowerCase() === primary.toLowerCase()) {
+      return supported;
+    }
+  }
+  throw new Error(`Deepgram language "${lang}" is not supported`);
+}
+
 export class DeepgramAdapter extends BaseAdapter {
   id = 'deepgram' as const;
   supportsStreaming = true;
@@ -21,10 +141,12 @@ export class DeepgramAdapter extends BaseAdapter {
 
   async startStreaming(opts: StreamingOptions): Promise<StreamingSession> {
     const apiKey = requireApiKey();
+    const language = normalizeDeepgramLanguage(opts.language);
     const query = new URLSearchParams({
       encoding: opts.encoding,
       sample_rate: String(opts.sampleRateHz),
-      language: opts.language,
+      channels: '1',
+      language,
       punctuate: opts.punctuationPolicy === 'none' ? 'false' : 'true',
     });
     if (opts.enableInterim === false) {
@@ -42,6 +164,7 @@ export class DeepgramAdapter extends BaseAdapter {
       ws.once('error', (err) => reject(err));
       ws.once('close', () => reject(new Error('WebSocket closed before open')));
     });
+    void wsReady.catch(() => undefined);
 
     const listeners: {
       data: ((t: PartialTranscript) => void)[];
@@ -86,16 +209,38 @@ export class DeepgramAdapter extends BaseAdapter {
       listeners.close.forEach((cb) => cb());
     });
 
+    let closeScheduled = false;
+
+    const closeWs = () => {
+      if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        return;
+      }
+      if (ws.readyState === WebSocket.CONNECTING) {
+        if (closeScheduled) {
+          return;
+        }
+        closeScheduled = true;
+        ws.once('open', () => {
+          closeScheduled = false;
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.close();
+          }
+        });
+        return;
+      }
+      ws.close();
+    };
+
     const controller = {
       async sendAudio(chunk: ArrayBufferLike) {
         await wsReady;
         ws.send(Buffer.from(chunk));
       },
       async end() {
-        ws.close();
+        closeWs();
       },
       async close() {
-        ws.close();
+        closeWs();
       },
     };
 
@@ -114,52 +259,88 @@ export class DeepgramAdapter extends BaseAdapter {
   }
 
   async transcribeFileFromPCM(pcm: NodeJS.ReadableStream, opts: StreamingOptions): Promise<BatchResult> {
+    const buffer = await collectStream(pcm);
+    if ('destroy' in pcm && typeof (pcm as Readable).destroy === 'function') {
+      (pcm as Readable).destroy();
+    }
     const apiKey = requireApiKey();
+    const language = normalizeDeepgramLanguage(opts.language);
     const query = new URLSearchParams({
-      language: opts.language,
+      encoding: opts.encoding,
+      sample_rate: String(opts.sampleRateHz),
+      language,
       punctuate: opts.punctuationPolicy === 'none' ? 'false' : 'true',
     });
     if (opts.dictionaryPhrases && opts.dictionaryPhrases.length > 0) {
       query.set('keywords', opts.dictionaryPhrases.join(','));
     }
     const contentType = `audio/l16; rate=${opts.sampleRateHz}; channels=1`;
-
-    const controller = new AbortController();
-    const hardTimeout = setTimeout(() => controller.abort(new Error('Deepgram batch hard timeout')), 5 * 60 * 1000); // 5m cap
-    const idleTimeoutMs = 30_000;
-    let idleTimer: NodeJS.Timeout | null = null;
-    const resetIdle = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => controller.abort(new Error('Deepgram batch idle timeout')), idleTimeoutMs);
+    const url = `${DEEPGRAM_HTTP}?${query.toString()}`;
+    const headers = {
+      Authorization: `Token ${apiKey}`,
+      'Content-Type': contentType,
     };
-    resetIdle();
+    return this.sendBufferWithRetry(buffer, url, headers);
+  }
 
-    const readable = pcm as Readable;
-    readable.on('readable', resetIdle);
+  private async sendBufferWithRetry(
+    buffer: Buffer,
+    url: string,
+    headers: Record<string, string>
+  ): Promise<BatchResult> {
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= MAX_DEEPGRAM_BATCH_ATTEMPTS; attempt += 1) {
+      try {
+        const res = await this.postBuffer(buffer, url, headers);
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          const error = new Error(`Deepgram batch failed: ${res.status} ${text}`);
+          if (!shouldRetryStatus(res.status) || attempt === MAX_DEEPGRAM_BATCH_ATTEMPTS) {
+            throw error;
+          }
+          lastError = error;
+          await retryDelay(attempt);
+          continue;
+        }
+        const json: any = await res.json();
+        return this.parseBatchResult(json);
+      } catch (error) {
+        if (attempt === MAX_DEEPGRAM_BATCH_ATTEMPTS || !shouldRetryError(error)) {
+          throw error instanceof Error ? error : new Error('Deepgram batch failed');
+        }
+        lastError = error as Error;
+        await retryDelay(attempt);
+      }
+    }
+    throw lastError ?? new Error('Deepgram batch failed');
+  }
 
+  private async postBuffer(
+    buffer: Buffer,
+    url: string,
+    headers: Record<string, string>
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const hardTimeout = setTimeout(() => controller.abort(new Error('Deepgram batch hard timeout')), HARD_TIMEOUT_MS);
+    const idleTimer = setTimeout(() => controller.abort(new Error('Deepgram batch idle timeout')), IDLE_TIMEOUT_MS);
     const requestInit: RequestInit = {
       method: 'POST',
       headers: {
-        Authorization: `Token ${apiKey}`,
-        'Content-Type': contentType,
+        ...headers,
+        'Content-Length': String(buffer.length),
       },
-      body: Readable.toWeb(readable) as unknown as BodyInit,
+      body: buffer,
       signal: controller.signal,
     };
-    // Node fetch requires duplex for streamed request bodies
-    (requestInit as any).duplex = 'half';
-
-    const res = await fetch(`${DEEPGRAM_HTTP}?${query.toString()}`, requestInit);
-
-    clearTimeout(hardTimeout);
-    if (idleTimer) clearTimeout(idleTimer);
-    readable.off('readable', resetIdle);
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Deepgram batch failed: ${res.status} ${text}`);
+    try {
+      return await fetch(url, requestInit);
+    } finally {
+      clearTimeout(hardTimeout);
+      clearTimeout(idleTimer);
     }
-    const json: any = await res.json();
+  }
+
+  private parseBatchResult(json: any): BatchResult {
     const alt = json.results?.channels?.[0]?.alternatives?.[0];
     const durationSec = json.metadata?.duration ?? alt?.duration ?? 0;
     const vendorProcessingMs = Math.round(

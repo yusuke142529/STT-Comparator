@@ -16,5 +16,8 @@
     "retentionDays": 30,
     "maxRows": 100000
   },
-  "providers": ["mock", "deepgram"]
+  "providers": ["deepgram", "local_whisper", "whisper_streaming"],
+  "providerHealth": {
+    "refreshMs": 5000
+  }
 }

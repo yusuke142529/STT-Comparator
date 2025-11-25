@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { PROVIDER_IDS } from './types.js';
 import type { AppConfig, ProviderId } from './types.js';
 
 const normalizationSchema = z.object({
@@ -9,19 +10,6 @@ const normalizationSchema = z.object({
   stripSpace: z.boolean().optional(),
   lowercase: z.boolean().optional(),
 });
-
-const providerIds = [
-  'google',
-  'aws',
-  'azure',
-  'deepgram',
-  'revai',
-  'speechmatics',
-  'openai',
-  'local_whisper',
-  'nvidia_riva',
-  'mock',
-] as const;
 
 const configSchema = z.object({
   audio: z.object({
@@ -36,7 +24,7 @@ const configSchema = z.object({
     retentionDays: z.number().min(1).max(3650).default(30),
     maxRows: z.number().min(100).max(1_000_000).default(100_000),
   }),
-  providers: z.array(z.enum(providerIds)),
+  providers: z.array(z.enum(PROVIDER_IDS)),
   jobs: z
     .object({
       maxParallel: z.number().min(1).max(64).default(4),
@@ -49,6 +37,11 @@ const configSchema = z.object({
       maxPcmQueueBytes: z.number().min(128 * 1024).max(100 * 1024 * 1024).default(5 * 1024 * 1024),
     })
     .partial()
+    .default({}),
+  providerHealth: z
+    .object({
+      refreshMs: z.number().int().min(1).optional(),
+    })
     .default({}),
 });
 

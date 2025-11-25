@@ -4,6 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { BatchJobFileResult, StorageDriver } from '../types.js';
+import { JobHistory } from './jobHistory.js';
 
 vi.mock('../config.js', () => ({
   loadConfig: vi.fn().mockResolvedValue({
@@ -27,6 +28,15 @@ describe('BatchRunner', () => {
     };
   };
 
+  const setupRunner = async (store: ReturnType<typeof memoryStore>) => {
+    const history = new JobHistory(store);
+    await history.init();
+    const { BatchRunner } = await import('./batchRunner.js');
+    const runner = new BatchRunner(store, history);
+    await runner.init();
+    return { runner, store };
+  };
+
   beforeEach(() => {
     vi.resetModules();
   });
@@ -34,6 +44,22 @@ describe('BatchRunner', () => {
   afterEach(() => {
     vi.clearAllMocks();
   });
+
+  const waitForJob = async (
+    runner: { getStatus: (id: string) => any },
+    jobId: string,
+    timeoutMs = 500
+  ) => {
+    const start = Date.now();
+    let lastStatus: any = null;
+    while (Date.now() - start < timeoutMs) {
+      const status = runner.getStatus(jobId);
+      lastStatus = status;
+      if (status && (status.done + status.failed >= status.total)) return status;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`job did not complete in time; last status: ${JSON.stringify(lastStatus)}`);
+  };
 
   it('falls back to measured duration when adapter does not provide durationSec', async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), 'batch-test-'));
@@ -61,13 +87,14 @@ describe('BatchRunner', () => {
       })),
     }));
 
-    const { BatchRunner } = await import('./batchRunner.js');
     const store = memoryStore();
-    const runner = new BatchRunner(store);
-    await runner.init();
-    await runner.enqueue('mock', 'ja-JP', [{ path: filePath, originalname: 'a.wav', size: 1 }]);
+    const { runner } = await setupRunner(store);
+    const jobSpy = vi.spyOn(runner as any, 'processJob');
+    const { jobId } = await runner.enqueue('mock', 'ja-JP', [{ path: filePath, originalname: 'a.wav', size: 1 }]);
 
-    await new Promise((r) => setTimeout(r, 20));
+    await waitForJob(runner as any, jobId);
+
+    expect(jobSpy).toHaveBeenCalled();
 
     expect(store.records).toHaveLength(1);
     expect(store.records[0].durationSec).toBeCloseTo(2, 6);
@@ -99,10 +126,8 @@ describe('BatchRunner', () => {
       })),
     }));
 
-    const { BatchRunner } = await import('./batchRunner.js');
     const store = memoryStore();
-    const runner = new BatchRunner(store);
-    await runner.init();
+    const { runner } = await setupRunner(store);
     const { jobId } = await runner.enqueue(
       'mock',
       'ja-JP',
@@ -110,8 +135,7 @@ describe('BatchRunner', () => {
       { version: 1, language: 'ja-JP', items: [{ audio: 'a.wav', ref: 'ref' }] }
     );
 
-    await new Promise((r) => setTimeout(r, 20));
-    const status = runner.getStatus(jobId);
+    const status = await waitForJob(runner as any, jobId);
 
     expect(store.records).toHaveLength(0);
     expect(status?.failed).toBe(1);
@@ -146,17 +170,14 @@ describe('BatchRunner', () => {
       })),
     }));
 
-    const { BatchRunner } = await import('./batchRunner.js');
     const store = memoryStore();
-    const runner = new BatchRunner(store);
-    await runner.init();
+    const { runner } = await setupRunner(store);
     const { jobId } = await runner.enqueue('mock', 'ja-JP', [
       { path: filePathA, originalname: 'a.wav', size: 1 },
       { path: filePathB, originalname: 'b.wav', size: 1 },
     ]);
 
-    await new Promise((r) => setTimeout(r, 30));
-    const status = runner.getStatus(jobId);
+    const status = await waitForJob(runner as any, jobId);
     expect(status?.total).toBe(2);
     expect((status?.done ?? 0) + (status?.failed ?? 0)).toBe(2);
   });
