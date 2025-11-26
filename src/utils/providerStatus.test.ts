@@ -1,4 +1,4 @@
-import { describe, expect, beforeEach, beforeAll, it, vi } from 'vitest';
+import { describe, expect, beforeEach, it, vi } from 'vitest';
 
 vi.mock('./whisper.js', () => ({
   getWhisperRuntime: vi.fn(),
@@ -86,62 +86,46 @@ describe('computeProviderAvailability(local_whisper)', () => {
 });
 
 describe('computeProviderAvailability(whisper_streaming)', () => {
-  let wsMockModule: any;
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeAll(async () => {
-    wsMockModule = await import('ws');
+  const createMonitor = (snapshot: { available: boolean; reason?: string }) => ({
+    updateRefreshMs: vi.fn(),
+    triggerCheck: vi.fn(),
+    getSnapshot: vi.fn(() => snapshot),
+    forceCheck: vi.fn(async () => {}),
   });
 
-  beforeEach(() => {
-    (wsMockModule.__setOutcome as any)('open');
-    wsMockModule.__instances.length = 0;
-    fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('marks available when WS opens', async () => {
-    (wsMockModule.__setOutcome as any)('open');
+  it('propagates the monitor availability when healthy', async () => {
+    const monitor = createMonitor({ available: true });
     const config: AppConfig = { ...baseConfig, providers: ['whisper_streaming'] };
-    const result = await computeProviderAvailability(config);
+    const result = await computeProviderAvailability(config, { monitor });
     expect(result[0].available).toBe(true);
-    expect(wsMockModule.__instances.length).toBeGreaterThan(0);
-    expect(fetchMock).toHaveBeenCalled();
-  });
-
-  it('marks unavailable with reason when WS errors', async () => {
-    (wsMockModule.__setOutcome as any)('error', new Error('conn refused'));
-    const config: AppConfig = { ...baseConfig, providers: ['whisper_streaming'] };
-    const result = await computeProviderAvailability(config);
-    expect(result[0].available).toBe(false);
-    expect(result[0].reason).toContain('conn refused');
-  });
-
-  it('marks unavailable when HTTP health fails', async () => {
-    fetchMock.mockResolvedValueOnce(new Response('fail', { status: 500 }));
-    const config: AppConfig = { ...baseConfig, providers: ['whisper_streaming'] };
-    const result = await computeProviderAvailability(config);
-    expect(result[0].available).toBe(false);
-    expect(result[0].reason).toContain('http');
-  });
-
-  it('marks available when HTTP returns a client error', async () => {
-    fetchMock.mockResolvedValueOnce(new Response('not allowed', { status: 405, statusText: 'Method Not Allowed' }));
-    const config: AppConfig = { ...baseConfig, providers: ['whisper_streaming'] };
-    const result = await computeProviderAvailability(config);
-    expect(result[0].available).toBe(true);
+    expect(result[0].supportsStreaming).toBe(true);
+    expect(result[0].supportsBatch).toBe(true);
     expect(result[0].reason).toBeUndefined();
+    expect(monitor.triggerCheck).toHaveBeenCalled();
+    expect(monitor.updateRefreshMs).toHaveBeenCalledWith(5000);
   });
 
-  it('uses HTTP error when WS succeeds but HTTP rejects', async () => {
-    fetchMock.mockRejectedValueOnce(new Error('http down'));
+  it('exposes the monitor reason when unhealthy', async () => {
+    const monitor = createMonitor({ available: false, reason: 'ready check failed' });
     const config: AppConfig = { ...baseConfig, providers: ['whisper_streaming'] };
-    const result = await computeProviderAvailability(config);
+    const result = await computeProviderAvailability(config, { monitor });
     expect(result[0].available).toBe(false);
-    expect(result[0].reason).toContain('http down');
+    expect(result[0].reason).toBe('ready check failed');
+  });
+});
+
+describe('computeProviderAvailability feature flags', () => {
+  it('reports dictionary/句読点 support per provider', async () => {
+    const config: AppConfig = { ...baseConfig, providers: ['deepgram', 'elevenlabs'] };
+    const result = await computeProviderAvailability(config);
+    const deepgram = result.find((p) => p.id === 'deepgram');
+    const elevenlabs = result.find((p) => p.id === 'elevenlabs');
+    expect(deepgram).toBeDefined();
+    expect(deepgram?.supportsDictionaryPhrases).toBe(true);
+    expect(deepgram?.supportsPunctuationPolicy).toBe(true);
+    expect(elevenlabs).toBeDefined();
+    expect(elevenlabs?.supportsDictionaryPhrases).toBe(false);
+    expect(elevenlabs?.supportsPunctuationPolicy).toBe(false);
+    expect(elevenlabs?.supportsContextPhrases).toBe(false);
   });
 });

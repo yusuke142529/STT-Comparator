@@ -19,7 +19,7 @@ import { convertToPcmReadable } from '../utils/ffmpeg.js';
 import { cer, rtf, wer } from '../scoring/metrics.js';
 import { matchManifestItem } from '../utils/manifest.js';
 import os from 'node:os';
-import { JobHistory } from './jobHistory.js';
+import type { JobHistory } from './jobHistory.js';
 
 interface FileInput {
   originalname: string;
@@ -126,7 +126,7 @@ export class BatchRunner {
     await Promise.all(workers);
 
     // release heavy references and schedule eviction
-    job.files = [] as any;
+    job.files = [];
     job.manifest = undefined;
     job.options = undefined;
 

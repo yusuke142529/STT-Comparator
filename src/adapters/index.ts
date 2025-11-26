@@ -1,6 +1,7 @@
 import type { ProviderAdapter, ProviderId } from '../types.js';
 import { MockAdapter } from './mock.js';
 import { DeepgramAdapter } from './deepgram.js';
+import { ElevenLabsAdapter } from './elevenlabs.js';
 import { LocalWhisperAdapter } from './localWhisper.js';
 import { WhisperStreamingAdapter } from './whisperStreaming.js';
 
@@ -11,6 +12,7 @@ function ensureAdapterInstances(): void {
   const adapters: ProviderAdapter[] = [
     new MockAdapter(),
     new DeepgramAdapter(),
+    new ElevenLabsAdapter(),
     new LocalWhisperAdapter(),
     new WhisperStreamingAdapter(),
   ];

@@ -53,16 +53,18 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
       .run();
 
     // simple migration: add jobId if missing
-    const hasJobId = this.db.prepare(`PRAGMA table_info('results')`).all().some((row: any) => row.name === 'jobId');
+    const jobColumns = this.db.prepare(`PRAGMA table_info('results')`).all() as Database.ColumnDefinition[];
+    const hasJobId = jobColumns.some((row) => row.name === 'jobId');
     if (!hasJobId) {
       this.db.prepare(`ALTER TABLE results ADD COLUMN jobId TEXT`).run();
     }
-    const hasVendorProcessing = this.db.prepare(`PRAGMA table_info('results')`).all().some((row: any) => row.name === 'vendorProcessingMs');
+    const hasVendorProcessing = jobColumns.some((row) => row.name === 'vendorProcessingMs');
     if (!hasVendorProcessing) {
       this.db.prepare(`ALTER TABLE results ADD COLUMN vendorProcessingMs INTEGER`).run();
     }
 
-    const hasCreatedAt = this.db.prepare(`PRAGMA table_info('results')`).all().some((row: any) => row.name === 'createdAt');
+    const createdAtColumns = this.db.prepare(`PRAGMA table_info('results')`).all() as Database.ColumnDefinition[];
+    const hasCreatedAt = createdAtColumns.some((row) => row.name === 'createdAt');
     if (!hasCreatedAt) {
       this.db.prepare(`ALTER TABLE results ADD COLUMN createdAt TEXT`).run();
       this.db.prepare(`UPDATE results SET createdAt = datetime('now') WHERE createdAt IS NULL`).run();

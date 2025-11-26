@@ -1,6 +1,6 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
-import { useRetry } from './useRetry.js';
+import { useRetry } from './useRetry';
 
 describe('useRetry', () => {
   beforeEach(() => {

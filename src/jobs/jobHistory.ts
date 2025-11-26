@@ -1,5 +1,6 @@
 import type { StorageDriver, BatchJobFileResult } from '../types.js';
-import { summarizeJob, JobSummary } from '../utils/summary.js';
+import { summarizeJob } from '../utils/summary.js';
+import type { JobSummary } from '../utils/summary.js';
 
 export interface JobHistoryEntry {
   jobId: string;
@@ -88,11 +89,13 @@ export class JobHistory {
       return;
     }
 
+    const boundReader = reader.bind(this.storage);
+
     const jobIds = [...this.rowsByJob.keys()];
     const synced = await Promise.all(
       jobIds.map(async (jobId) => ({
         jobId,
-        rows: await reader(jobId),
+        rows: await boundReader(jobId),
       }))
     );
 

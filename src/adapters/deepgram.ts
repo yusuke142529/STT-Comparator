@@ -1,6 +1,6 @@
-import { Readable } from 'node:stream';
+import type { Readable } from 'node:stream';
 import { WebSocket } from 'ws';
-import type { BatchResult, PartialTranscript, StreamingOptions, StreamingSession } from '../types.js';
+import type { BatchResult, PartialTranscript, StreamingOptions, StreamingSession, TranscriptWord } from '../types.js';
 import { BaseAdapter } from './base.js';
 
 const DEEPGRAM_WS = 'wss://api.deepgram.com/v1/listen';
@@ -11,6 +11,7 @@ const HARD_TIMEOUT_MS = 5 * 60 * 1000;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
 const BASE_RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 10_000;
+const DEFAULT_ENDPOINTING_MS = 400;
 
 const SUPPORTED_DEEPGRAM_LANGUAGES = [
   'multi',
@@ -67,6 +68,49 @@ const SUPPORTED_DEEPGRAM_LANGUAGES = [
   'vi',
 ] as const;
 const SUPPORTED_DEEPGRAM_LANGUAGE_SET = new Set(SUPPORTED_DEEPGRAM_LANGUAGES);
+
+interface DeepgramWord {
+  start?: number;
+  end?: number;
+  word?: string;
+  confidence?: number;
+}
+
+interface DeepgramAlternative {
+  transcript?: string;
+  words?: DeepgramWord[];
+  duration?: number;
+}
+
+interface DeepgramStreamingChannel {
+  alternatives?: DeepgramAlternative[];
+}
+
+interface DeepgramStreamingMessage {
+  type?: string;
+  channel?: DeepgramStreamingChannel;
+  is_final?: boolean;
+  isFinal?: boolean;
+  message?: string;
+}
+
+interface DeepgramBatchMetadata {
+  duration?: number;
+  processing_ms?: number;
+  processing_time?: number;
+}
+
+interface DeepgramBatchResponse {
+  results?: { channels?: { alternatives?: DeepgramAlternative[] }[] }[];
+  metadata?: DeepgramBatchMetadata;
+}
+
+const mapDeepgramWord = (word: DeepgramWord): TranscriptWord => ({
+  startSec: Number(word.start ?? 0),
+  endSec: Number(word.end ?? 0),
+  text: word.word ?? '',
+  confidence: typeof word.confidence === 'number' ? word.confidence : undefined,
+});
 
 function requireApiKey(): string {
   const key = process.env.DEEPGRAM_API_KEY;
@@ -134,6 +178,34 @@ function normalizeDeepgramLanguage(lang: string): string {
   throw new Error(`Deepgram language "${lang}" is not supported`);
 }
 
+function joinPhrases(values?: readonly string[]): string | undefined {
+  if (!values?.length) return undefined;
+  const normalized = values.map((value) => value.trim()).filter((value) => value.length > 0);
+  return normalized.length > 0 ? normalized.join(',') : undefined;
+}
+
+function appendPhraseParameters(query: URLSearchParams, opts: Pick<StreamingOptions, 'dictionaryPhrases' | 'contextPhrases'>) {
+  const keywords = joinPhrases(opts.dictionaryPhrases);
+  if (keywords) {
+    query.set('keywords', keywords);
+  }
+  const context = joinPhrases(opts.contextPhrases);
+  if (context) {
+    query.set('context', context);
+  }
+}
+
+function appendVadParameters(query: URLSearchParams, enableVad?: boolean) {
+  if (enableVad === false) {
+    query.set('endpointing', 'false');
+    return;
+  }
+  if (enableVad === true) {
+    query.set('endpointing', String(DEFAULT_ENDPOINTING_MS));
+    query.set('vad_events', 'true');
+  }
+}
+
 export class DeepgramAdapter extends BaseAdapter {
   id = 'deepgram' as const;
   supportsStreaming = true;
@@ -152,9 +224,8 @@ export class DeepgramAdapter extends BaseAdapter {
     if (opts.enableInterim === false) {
       query.set('interim_results', 'false');
     }
-    if (opts.dictionaryPhrases && opts.dictionaryPhrases.length > 0) {
-      query.set('keywords', opts.dictionaryPhrases.join(','));
-    }
+    appendPhraseParameters(query, opts);
+    appendVadParameters(query, opts.enableVad);
     const ws = new WebSocket(`${DEEPGRAM_WS}?${query.toString()}`, {
       headers: { Authorization: `Token ${apiKey}` },
     });
@@ -174,7 +245,7 @@ export class DeepgramAdapter extends BaseAdapter {
 
     ws.on('message', (data) => {
       try {
-        const json = JSON.parse(data.toString());
+        const json = JSON.parse(data.toString()) as DeepgramStreamingMessage;
         if (json.type === 'Results' && json.channel?.alternatives?.length) {
           const alt = json.channel.alternatives[0];
           const isFinal = Boolean(json.is_final);
@@ -182,12 +253,7 @@ export class DeepgramAdapter extends BaseAdapter {
             provider: this.id,
             isFinal,
             text: alt.transcript ?? '',
-            words: alt.words?.map((w: any) => ({
-              startSec: w.start ?? 0,
-              endSec: w.end ?? 0,
-              text: w.word ?? '',
-              confidence: w.confidence,
-            })),
+            words: alt.words?.map(mapDeepgramWord),
             timestamp: Date.now(),
             channel: 'mic',
           };
@@ -271,9 +337,8 @@ export class DeepgramAdapter extends BaseAdapter {
       language,
       punctuate: opts.punctuationPolicy === 'none' ? 'false' : 'true',
     });
-    if (opts.dictionaryPhrases && opts.dictionaryPhrases.length > 0) {
-      query.set('keywords', opts.dictionaryPhrases.join(','));
-    }
+    appendPhraseParameters(query, opts);
+    appendVadParameters(query, opts.enableVad);
     const contentType = `audio/l16; rate=${opts.sampleRateHz}; channels=1`;
     const url = `${DEEPGRAM_HTTP}?${query.toString()}`;
     const headers = {
@@ -302,7 +367,7 @@ export class DeepgramAdapter extends BaseAdapter {
           await retryDelay(attempt);
           continue;
         }
-        const json: any = await res.json();
+        const json = (await res.json()) as DeepgramBatchResponse;
         return this.parseBatchResult(json);
       } catch (error) {
         if (attempt === MAX_DEEPGRAM_BATCH_ATTEMPTS || !shouldRetryError(error)) {
@@ -340,23 +405,16 @@ export class DeepgramAdapter extends BaseAdapter {
     }
   }
 
-  private parseBatchResult(json: any): BatchResult {
-    const alt = json.results?.channels?.[0]?.alternatives?.[0];
+  private parseBatchResult(json: DeepgramBatchResponse): BatchResult {
+    const alt = json.results?.[0]?.channels?.[0]?.alternatives?.[0];
     const durationSec = json.metadata?.duration ?? alt?.duration ?? 0;
-    const vendorProcessingMs = Math.round(
-      (json.metadata?.processing_ms as number | undefined) ??
-        (json.metadata?.processing_time as number | undefined) ??
-        0
-    );
+    const vendorMs =
+      (json.metadata?.processing_ms ?? json.metadata?.processing_time) ?? 0;
+    const vendorProcessingMs = Number.isFinite(vendorMs) ? Math.round(vendorMs) : 0;
     return {
       provider: this.id,
       text: alt?.transcript ?? '',
-      words: alt?.words?.map((w: any) => ({
-        startSec: w.start ?? 0,
-        endSec: w.end ?? 0,
-        text: w.word ?? '',
-        confidence: w.confidence,
-      })),
+      words: alt?.words?.map(mapDeepgramWord),
       durationSec,
       vendorProcessingMs: Number.isFinite(vendorProcessingMs) ? vendorProcessingMs : undefined,
     };

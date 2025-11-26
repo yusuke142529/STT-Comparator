@@ -1,96 +1,98 @@
 import { Readable } from 'node:stream';
 import { WebSocket } from 'ws';
-import type { BatchResult, PartialTranscript, StreamingOptions, StreamingSession } from '../types.js';
+import type { BatchResult, PartialTranscript, StreamingOptions, StreamingSession, TranscriptWord } from '../types.js';
 import { BaseAdapter } from './base.js';
-import {
-  getWhisperStreamingHttpUrl,
-  getWhisperStreamingReadyIntervalMs,
-  getWhisperStreamingReadyTimeoutMs,
-  getWhisperStreamingReadyUrl,
-  getWhisperStreamingWsUrl,
-} from '../utils/whisperStreamingConfig.js';
+import { getWhisperStreamingHttpUrl, getWhisperStreamingWsUrl } from '../utils/whisperStreamingConfig.js';
+import { waitForWhisperStreamingReady } from '../utils/whisperStreamingHealth.js';
 
 const DEFAULT_MODEL = 'small';
 const WS_OPEN_TIMEOUT_MS = 10_000;
 const WS_IDLE_SEND_TIMEOUT_MS = 10_000;
 const BATCH_HARD_TIMEOUT_MS = 5 * 60 * 1000; // 5m
 const BATCH_IDLE_TIMEOUT_MS = 30_000;
-async function waitForWhisperStreamingReady(): Promise<void> {
-  if (process.env.NODE_ENV === 'test') {
-    return;
-  }
-  const timeoutMs = getWhisperStreamingReadyTimeoutMs();
-  if (timeoutMs <= 0) {
-    return;
-  }
-  const readyUrl = getWhisperStreamingReadyUrl();
-  const intervalMs = getWhisperStreamingReadyIntervalMs();
-  const deadline = Date.now() + timeoutMs;
-  let lastError: Error | null = null;
 
-  while (Date.now() <= deadline) {
-    try {
-      await fetch(readyUrl, { method: 'GET', cache: 'no-store' });
-      return;
-    } catch (error) {
-      lastError = error as Error;
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) {
-        break;
-      }
-      await delay(Math.min(intervalMs, remainingMs));
+type WhisperWordSource = {
+  start?: number;
+  end?: number;
+  startSec?: number;
+  endSec?: number;
+  t0?: number;
+  t1?: number;
+  word?: string;
+  text?: string;
+  confidence?: number;
+  probability?: number;
+};
+
+interface WhisperSegment {
+  words?: WhisperWordSource[];
+}
+
+interface WhisperStreamingMessage {
+  text?: string;
+  partial?: string;
+  transcript?: string;
+  transcription?: string;
+  result?: string;
+  is_final?: boolean;
+  isFinal?: boolean;
+  final?: boolean;
+  done?: boolean;
+  complete?: boolean;
+  type?: string;
+  words?: WhisperWordSource[];
+  segments?: WhisperSegment[];
+  [key: string]: unknown;
+}
+
+interface FetchDuplexInit extends RequestInit {
+  duplex?: 'half';
+}
+
+const normalizeWhisperWord = (word: WhisperWordSource): TranscriptWord => ({
+  startSec: Number(word.startSec ?? word.start ?? word.t0 ?? 0),
+  endSec: Number(word.endSec ?? word.end ?? word.t1 ?? 0),
+  text: String(word.text ?? word.word ?? '').trim(),
+  confidence: typeof word.confidence === 'number' ? word.confidence : undefined,
+});
+
+const extractWordSources = (value: unknown): WhisperWordSource[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is WhisperWordSource => typeof item === 'object' && item !== null);
+};
+
+const wordsFromMessage = (message: WhisperStreamingMessage): TranscriptWord[] | undefined => {
+  const direct = extractWordSources(message.words);
+  if (direct) return direct.map(normalizeWhisperWord);
+  if (Array.isArray(message.segments)) {
+    const segmentWords = message.segments.flatMap((segment) => extractWordSources(segment?.words) ?? []);
+    if (segmentWords.length > 0) {
+      return segmentWords.map(normalizeWhisperWord);
     }
   }
-
-  const baseMessage = `whisper_streaming health check timed out after ${timeoutMs}ms`;
-  if (lastError) {
-    throw new Error(`${baseMessage}: ${lastError.message}`);
-  }
-  throw new Error(baseMessage);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
+  return undefined;
+};
 function getModel(): string {
   return process.env.WHISPER_MODEL ?? DEFAULT_MODEL;
 }
 
-function toPartialTranscript(message: any): PartialTranscript | null {
+function toPartialTranscript(message: unknown): PartialTranscript | null {
   if (!message || typeof message !== 'object') return null;
-
+  const payload = message as WhisperStreamingMessage;
   const text =
-    message.text ??
-    message.partial ??
-    message.transcript ??
-    message.transcription ??
-    message.result ??
+    payload.text ??
+    payload.partial ??
+    payload.transcript ??
+    payload.transcription ??
+    payload.result ??
     '';
 
   const isFinal =
-    Boolean(message.is_final ?? message.isFinal ?? message.final ?? message.done ?? message.complete) ||
-    message.type === 'final' ||
-    message.type === 'completed';
+    Boolean(payload.is_final ?? payload.isFinal ?? payload.final ?? payload.done ?? payload.complete) ||
+    payload.type === 'final' ||
+    payload.type === 'completed';
 
-  const wordsSource = Array.isArray(message.words)
-    ? message.words
-    : Array.isArray(message.segments)
-      ? message.segments.flatMap((seg: any) => seg?.words ?? [])
-      : undefined;
-
-  const words =
-    wordsSource?.map((w: any) => ({
-      startSec: Number(w.start ?? w.startSec ?? w.t0 ?? w.from ?? 0),
-      endSec: Number(w.end ?? w.endSec ?? w.t1 ?? w.to ?? 0),
-      text: String(w.word ?? w.text ?? '').trim(),
-      confidence:
-        typeof w.confidence === 'number'
-          ? w.confidence
-          : typeof w.probability === 'number'
-            ? w.probability
-            : undefined,
-    })) ?? undefined;
+  const words = wordsFromMessage(payload);
 
   return {
     provider: 'whisper_streaming',
@@ -245,13 +247,13 @@ export class WhisperStreamingAdapter extends BaseAdapter {
     pcm.on('close', clearIdle);
 
     const contentType = `audio/l16; rate=${opts.sampleRateHz}; channels=1`;
-    const requestInit: RequestInit = {
+    const requestInit: FetchDuplexInit = {
       method: 'POST',
       headers: { 'Content-Type': contentType },
       body: Readable.toWeb(pcm) as unknown as BodyInit,
       signal: controller.signal,
     };
-    (requestInit as any).duplex = 'half';
+    requestInit.duplex = 'half';
 
     let res: Response;
     try {
@@ -269,7 +271,7 @@ export class WhisperStreamingAdapter extends BaseAdapter {
       throw new Error(`whisper_streaming batch failed: ${res.status} ${text || res.statusText}`);
     }
 
-    let payload: any;
+    let payload: unknown;
     try {
       payload = await res.json();
     } catch (err) {
@@ -277,37 +279,22 @@ export class WhisperStreamingAdapter extends BaseAdapter {
       throw new Error(`whisper_streaming batch parse error: ${(err as Error).message}${body ? `; body=${body}` : ''}`);
     }
 
-    const words =
-      (Array.isArray(payload.words)
-        ? payload.words
-        : Array.isArray(payload.segments)
-          ? payload.segments.flatMap((seg: any) => seg?.words ?? [])
-          : undefined
-      )?.map((w: any) => ({
-        startSec: Number(w.start ?? w.startSec ?? w.t0 ?? 0),
-        endSec: Number(w.end ?? w.endSec ?? w.t1 ?? 0),
-        text: String(w.word ?? w.text ?? '').trim(),
-        confidence:
-          typeof w.confidence === 'number'
-            ? w.confidence
-            : typeof w.probability === 'number'
-              ? w.probability
-              : undefined,
-      }));
+    const payloadRecord = typeof payload === 'object' && payload !== null ? (payload as WhisperStreamingMessage) : {};
+    const words = wordsFromMessage(payloadRecord);
 
     const durationSecRaw =
-      payload.duration ??
-      payload.durationSec ??
-      payload.duration_seconds ??
-      (typeof payload.duration_ms === 'number' ? payload.duration_ms / 1000 : undefined);
+      (typeof payloadRecord.duration === 'number' ? payloadRecord.duration : undefined) ??
+      (typeof payloadRecord.durationSec === 'number' ? payloadRecord.durationSec : undefined) ??
+      (typeof payloadRecord.duration_seconds === 'number' ? payloadRecord.duration_seconds : undefined) ??
+      (typeof payloadRecord.duration_ms === 'number' ? payloadRecord.duration_ms / 1000 : undefined);
     const durationSec = typeof durationSecRaw === 'number' && Number.isFinite(durationSecRaw) ? durationSecRaw : undefined;
 
     const vendorProcessingMsRaw =
-      payload.processing_ms ??
-      payload.processingMs ??
-      payload.processing_time ??
-      payload.vendorProcessingMs ??
-      payload.time_ms;
+      (typeof payloadRecord.processing_ms === 'number' ? payloadRecord.processing_ms : undefined) ??
+      (typeof payloadRecord.processingMs === 'number' ? payloadRecord.processingMs : undefined) ??
+      (typeof payloadRecord.processing_time === 'number' ? payloadRecord.processing_time : undefined) ??
+      (typeof payloadRecord.vendorProcessingMs === 'number' ? payloadRecord.vendorProcessingMs : undefined) ??
+      (typeof payloadRecord.time_ms === 'number' ? payloadRecord.time_ms : undefined);
     const vendorProcessingMs =
       typeof vendorProcessingMsRaw === 'number' && Number.isFinite(vendorProcessingMsRaw)
         ? Math.round(vendorProcessingMsRaw)

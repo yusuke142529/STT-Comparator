@@ -125,3 +125,24 @@ export function normalizeWhisperLanguage(language?: string): string | undefined 
 
   return undefined;
 }
+
+const ISO_LANGUAGE_CODE_REGEX = /^[a-z]{2,3}$/;
+
+export function normalizeIsoLanguageCode(language?: string): string | undefined {
+  if (!language) {
+    return undefined;
+  }
+
+  const trimmed = language.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  const [primary] = normalized.split(/[-_]/);
+  if (!primary) {
+    return undefined;
+  }
+
+  return ISO_LANGUAGE_CODE_REGEX.test(primary) ? primary : undefined;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeWhisperLanguage } from './language.js';
+import { normalizeIsoLanguageCode, normalizeWhisperLanguage } from './language.js';
 
 describe('normalizeWhisperLanguage', () => {
   it('returns the same code when supported', () => {
@@ -21,5 +21,22 @@ describe('normalizeWhisperLanguage', () => {
     expect(normalizeWhisperLanguage('unsupported')).toBeUndefined();
     expect(normalizeWhisperLanguage('')).toBeUndefined();
     expect(normalizeWhisperLanguage('   ')).toBeUndefined();
+  });
+});
+
+describe('normalizeIsoLanguageCode', () => {
+  it('normalizes the primary ISO code', () => {
+    expect(normalizeIsoLanguageCode('EN')).toBe('en');
+    expect(normalizeIsoLanguageCode('fr-CA')).toBe('fr');
+    expect(normalizeIsoLanguageCode('zho')).toBe('zho');
+    expect(normalizeIsoLanguageCode('ZH-CN')).toBe('zh');
+  });
+
+  it('returns undefined for invalid or unsupported values', () => {
+    expect(normalizeIsoLanguageCode('english')).toBeUndefined();
+    expect(normalizeIsoLanguageCode('')).toBeUndefined();
+    expect(normalizeIsoLanguageCode('   ')).toBeUndefined();
+    expect(normalizeIsoLanguageCode('1a')).toBeUndefined();
+    expect(normalizeIsoLanguageCode('abcd')).toBeUndefined();
   });
 });

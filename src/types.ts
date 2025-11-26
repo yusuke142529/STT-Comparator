@@ -3,6 +3,7 @@ export const PROVIDER_IDS = [
   'aws',
   'azure',
   'deepgram',
+  'elevenlabs',
   'revai',
   'speechmatics',
   'openai',
@@ -114,6 +115,31 @@ export interface StreamSessionMessage {
 }
 
 export type StreamServerMessage = StreamTranscriptMessage | StreamErrorMessage | StreamSessionMessage;
+
+export interface StreamSessionEndMessage {
+  type: 'session_end';
+  endedAt: string;
+  reason?: string;
+}
+
+export type RealtimeLogPayload = StreamServerMessage | StreamSessionEndMessage;
+
+export interface RealtimeTranscriptLogEntry {
+  sessionId: string;
+  provider: ProviderId;
+  lang: string;
+  recordedAt: string;
+  payload: RealtimeLogPayload;
+}
+
+export interface RealtimeTranscriptSessionSummary {
+  sessionId: string;
+  provider: ProviderId;
+  lang: string;
+  startedAt: string | null;
+  lastRecordedAt: string;
+  entryCount: number;
+}
 
 export interface NormalizationConfig {
   nfkc?: boolean;

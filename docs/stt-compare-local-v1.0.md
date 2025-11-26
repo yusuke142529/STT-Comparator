@@ -7,7 +7,7 @@
 
 ### 0.2 成果物（Deliverables）
 - ローカル実行可能なアプリ（Web UI + ローカルサーバ）
-- プロバイダ差し替え可能な Adapter 群（現行バンドルは Mock + Deepgram。その他は拡張用雛形）
+- プロバイダ差し替え可能な Adapter 群（現行バンドルは Mock + Deepgram + ElevenLabs。その他は拡張用雛形）
 - 評価モジュール（WER/CER/レイテンシ/RTFなど）
 - 設定ファイル・環境変数テンプレート・README
 - サンプルデータと評価マニフェスト（JSON）雛形
@@ -82,7 +82,7 @@
 ```
 Web UI (React/TS) -> WS(JSON config + binary webm/opus) -> Local Node Server
 Node Server: Transmux (FFmpeg), Router, Scoring, Storage (JSONL/SQLite), CSV/JSON export
-Adapters: deepgram（実装済） / local_whisper（Batchのみ） / whisper_streaming（Realtime/Batch） / mock（ローカル確認/テスト用のスタブ。デフォルト設定には含めていない）。他クラウドは任意拡張（デフォルト無効）
+Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisper（Batchのみ） / whisper_streaming（Realtime/Batch） / mock（ローカル確認/テスト用のスタブ。デフォルト設定には含めていない）。他クラウドは任意拡張（デフォルト無効）
 ```
 
 ## 7. モジュール構成と責務
@@ -149,8 +149,17 @@ Adapters: deepgram（実装済） / local_whisper（Batchのみ） / whisper_str
   - CSV カラム例: path,provider,lang,cer,wer,rtf,latency_ms,text,ref_text
   - JSON 例: `{ path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, text, refText, opts }`
   - CSVはsnake_case、JSONはcamelCase。
-- GET `/api/jobs/:jobId/summary` → `{ count, cer:{avg,p50,p95}, wer:{...}, rtf:{...}, latencyMs:{...} }`
+  - GET `/api/jobs/:jobId/summary` → `{ count, cer:{avg,p50,p95}, wer:{...}, rtf:{...}, latencyMs:{...} }`
 
+### 9.5 リアルタイム: 内部再生
+- `POST /api/realtime/replay` (multipart/form-data: `file`, `provider`, `lang`) でファイルをアップロードし `sessionId` を返却。プロバイダは `streaming` 判定済みである必要があり、サーバは `ReplaySessionStore` に一時保存（TTL 5 分）し、録音なしでも同じ FFmpeg → Adapter の経路を再現する。
+- UI は返却された `sessionId` を使って `WS /ws/replay?provider=<id>&lang=<bcp47>&sessionId=<id>` に接続し、通常の `StreamingConfigMessage` を送信。WS はファイルから PCM を `controller.sendAudio` で送出し、`StreamTranscriptMessage` には `channel:'file'` を付与する。接続終了後、セッションファイルは削除される。
+- CLI の `scripts/realtime-replay.ts` も同様の `StreamingConfigMessage`/WS を使うため、UI の内部再生をベースにスクリプトを組み合わせることでマイクが不要な検証も行える。
+
+### 9.6 リアルタイム: ログ
+- `GET /api/realtime/logs/:sessionId` — 指定セッションの `session`, `transcript`, `error`, `session_end` を時系列で返す。生成AIなどへ渡すため、1セッション分の `StreamTranscriptMessage`（partial/final）、`latencyMs`、`channel`、`provider`、`timestamp` を含むタイムラインをサーバ側で蓄積しておける。
+- ログ行は `storage.driver` に応じて `runs/<date>/realtime-logs.jsonl`（JSONL）または SQLite 内の `realtime_logs` テーブルへ書きこまれ、`storage.retentionDays`/`storage.maxRows` の範囲で pruning される。`storage.path` を共有するバッチ/latency ログと同じストレージなので、生成AIレビューのために `runs` の任意の日付フォルダを丸ごとコピーしてもよい。
+- エントリ構造: `{ sessionId, provider, lang, recordedAt, payload }`。`payload` は `StreamSessionMessage` (`startedAt`)、`StreamTranscriptMessage`（`text`/`latencyMs`/`isFinal`）、`StreamErrorMessage`（`message`）、`StreamSessionEndMessage`（`endedAt`）のいずれか。
 ### 9.3 評価マニフェスト
 ```
 {
@@ -160,11 +169,16 @@ Adapters: deepgram（実装済） / local_whisper（Batchのみ） / whisper_str
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": true }
 }
 ```
+
+### 9.4 Realtime Replay Helper
+- `scripts/realtime-replay.ts` は UI の `MediaRecorder` → `/ws/stream` → FFmpeg → Adapter の本番経路を TypeScript で模倣し、`ffmpeg -re` で `sample-data` などのファイルを WebM/Opus に変換して直接ストリーミングします。このスクリプトを使えば、外部マイクを使えない静音環境でもプロバイダ・言語・マニフェストごとのレイテンシを再現性高く収集できます。
+- 起動: `pnpm replay:realtime --provider mock --language ja-JP --file sample-data/your.wav`（`--manifest sample-data/manifest.example.json` も可）。`--enable-interim`/`--normalize-preset`/`--punctuation`/`--context`/`--dictionary` や `--dry-run` により、StreamingConfigMessage のパラメタを UI と同じ感覚で調整できます。
+- 出力: `StreamTranscriptMessage` を受信するたびに `latencyMs` を含むログ行（`interim` と `final`）、最後に平均/p95/最大の latency 要約、transcript count、final count を表示します。`GET /api/realtime/latency?limit=20` と併せて session-level の集計と突合させれば、実験比較の信頼性が高まります。
+- プロバイダごと: Deepgram では `.env` に `DEEPGRAM_API_KEY`、ElevenLabs では `ELEVENLABS_API_KEY`、`whisper_streaming` では faster-whisper-server が起動済みで `WHISPER_STREAMING_READY_URL` が通る状態であることを確認してからスクリプトを叩いてください。`mock` でまず挙動を確認し、必要なら manifest の `items[]` にノイズ・会話・朗読などのサンプルを追加して比較軸を整えてください。
 - items[].audio はアップロード files[] のファイル名と一致させる。マッピング不可は警告/エラー。
 
 ## 10. 型仕様（TypeScript）
-- ProviderId: 'google' | 'aws' | 'azure' | 'deepgram' | 'revai' | 'speechmatics' | 'openai' | 'local_whisper' | 'nvidia_riva' | 'whisper_streaming' | 'mock'
-  - v1.0 デフォルト: `deepgram`, `local_whisper`, `whisper_streaming`（ローカル常駐 WS/HTTP サーバ, Streaming/Batch 両対応）。`mock` はローカル検証やテスト用途で必要に応じて追加してください。その他は拡張用。
+  - v1.0 デフォルト: `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`（ローカル常駐 WS/HTTP サーバ, Streaming/Batch 両対応）。`mock` はローカル検証やテスト用途で必要に応じて追加してください。その他は拡張用。
   - `whisper_streaming`: faster-whisper-server 等のローカル常駐エンドポイントを前提。WS 初期メッセージで language/task/model を送信し、partial/final を受信する。
 - StreamingOptions: language, sampleRateHz(16000), encoding 'linear16', enableInterim?, contextPhrases?
 - TranscriptWord, PartialTranscript (timestamp, channel 'mic'|'file')
@@ -182,9 +196,16 @@ Adapters: deepgram（実装済） / local_whisper（Batchのみ） / whisper_str
 ```
 PORT=5173
 DEEPGRAM_API_KEY=dg_xxx        # 現行デフォルトで必要なのはこれのみ
+ELEVENLABS_API_KEY=xi_xxx      # ElevenLabs を使うにはキーを設定
 WHISPER_WS_URL=ws://localhost:8000/v1/audio/transcriptions
 WHISPER_HTTP_URL=http://localhost:8000/v1/audio/transcriptions
 WHISPER_MODEL=small            # faster-whisper-server へ渡すモデル名
+# 電文が応答しない場合のバッチタイムアウト（ミリ秒）。省略時は 60000。
+ELEVENLABS_BATCH_TIMEOUT_MS=60000
+# 再試行を増やすには以下の値を設定。いずれも省略時は 3 回 / 拡張バックオフ（1000ms → 5000ms）です。
+ELEVENLABS_BATCH_MAX_ATTEMPTS=3
+ELEVENLABS_BATCH_BASE_DELAY_MS=1000
+ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 # 以下は拡張時に使用（デフォルトでは未使用）
 # AZURE_SPEECH_KEY=...
 # AZURE_SPEECH_REGION=...
@@ -199,10 +220,11 @@ WHISPER_MODEL=small            # faster-whisper-server へ渡すモデル名
   "audio": { "targetSampleRate": 16000, "targetChannels": 1, "chunkMs": 250 },
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": true },
   "storage": { "driver": "jsonl", "path": "./runs/2025-11-19" }, // driver は jsonl または sqlite
-  "providers": ["deepgram", "local_whisper", "whisper_streaming"] // ローカル用途の現行デフォルト（`mock` は任意追加）
+  "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"] // ローカル用途の現行デフォルト（`mock` は任意追加）
 }
 ```
 - `providerHealth.refreshMs` を指定すると `/api/providers` のヘルスチェック結果を再計算する間隔（ミリ秒）を調整できます。デフォルト 5000 によりローカルの `whisper_streaming` 等を起動した直後でも数秒で「利用可能」へ切り替わるようになり、同エンドポイントは TTL 内でキャッシュを再利用して過剰なヘルスチェックを防ぎます。即時再評価が必要なときは `/api/admin/reload-config` を叩いてください。
+- `/api/providers` のレスポンスには `supportsDictionaryPhrases` / `supportsPunctuationPolicy` / `supportsContextPhrases` のようなフラグも含まれるため、クライアントはプロバイダごとの機能差を UI 表示や辞書・句読点コントロールの有効/無効に反映できます。
 
 ## 12. 音声処理ポリシー
 - Realtime: webm/opus、Batch: wav/mp3/mp4。サーバで PCM S16LE 16k mono に統一。
@@ -215,7 +237,7 @@ WHISPER_MODEL=small            # faster-whisper-server へ渡すモデル名
 - 出力: 平均/p50/p95 を集計し UI と CSV/JSON で可視化。再現性確保。
 
 ## 14. UI仕様（要点）
-- Realtime: プロバイダ選択（現行は Deepgram と Whisper Streaming。local_whisper は Batch のみ対応）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。
+- Realtime: プロバイダ選択（現行は Deepgram、ElevenLabs、Whisper Streaming。local_whisper は Batch のみ対応）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。入力ソースはマイクと「内部ファイル再生」のトグルになっており、ファイル選択時は `/api/realtime/replay` で音声をサーバに送り、返却された `sessionId` を使って `/ws/replay` を開くことで mic-less の比較が可能です。
 - Batch Evaluate: ファイルドロップ、参照マニフェスト、並列度（options.parallel）、VAD/句読点/辞書入力、Run、進捗バー、結果テーブル、CSV/JSON DL。
 - Results: 最新ジョブの p50/p95 要約と per-file テーブル（provider/cer/wer/rtf/latency）。将来的な比較グラフは拡張範囲。
 - 操作: マイク許可必須、ストリーミング中は Stop 常設、プロバイダ切替時はセッションを安全終了。

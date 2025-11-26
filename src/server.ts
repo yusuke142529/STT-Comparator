@@ -9,8 +9,9 @@ import morgan from 'morgan';
 import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { handleStreamConnection } from './ws/streamHandler.js';
+import { handleReplayConnection } from './ws/replayHandler.js';
 import { logger } from './logger.js';
-import { createRealtimeStorage, createStorage } from './storage/index.js';
+import { createRealtimeStorage, createRealtimeTranscriptStore, createStorage } from './storage/index.js';
 import { loadConfig, reloadConfig } from './config.js';
 import { loadEnvironment, reloadEnvironment } from './utils/env.js';
 import { BatchRunner } from './jobs/batchRunner.js';
@@ -30,6 +31,8 @@ import type {
   EvaluationManifest,
 } from './types.js';
 import type { ProviderAvailability } from './utils/providerStatus.js';
+import { ReplaySessionStore } from './replay/replaySessionStore.js';
+import type { RealtimeTranscriptStore } from './storage/realtimeTranscriptStore.js';
 
 loadEnvironment();
 
@@ -42,6 +45,10 @@ export class HttpError extends Error {
     this.statusCode = statusCode;
     this.payload = payload;
   }
+}
+
+interface StatusCodeError extends Error {
+  statusCode?: number;
 }
 
 interface ParsedBatchRequest {
@@ -69,8 +76,9 @@ export function parseBatchRequest(
   try {
     requireProviderAvailable(providerAvailability, provider, 'batch');
   } catch (err) {
-    const statusCode = (err as any).statusCode ?? 400;
-    throw new HttpError(statusCode, (err as Error).message, { providers: providerAvailability });
+    const statusCode = (err as StatusCodeError).statusCode ?? 400;
+    const message = err instanceof Error ? err.message : 'provider validation failed';
+    throw new HttpError(statusCode, message, { providers: providerAvailability });
   }
 
   let manifest: EvaluationManifest | undefined;
@@ -113,6 +121,19 @@ export function createRealtimeLatencyHandler(
   };
 }
 
+export function createRealtimeLogSessionsHandler(store: RealtimeTranscriptStore) {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    try {
+      const raw = Number(req.query.limit ?? 20);
+      const limit = Number.isFinite(raw) ? Math.min(50, Math.max(1, raw)) : 20;
+      const items = await store.listSessions(limit);
+      res.json(items);
+    } catch (error) {
+      next(error as Error);
+    }
+  };
+}
+
 function parseAllowedOrigins(): string[] {
   const raw = process.env.ALLOWED_ORIGINS;
   const defaults = ['http://localhost:4100', 'http://localhost:5173'];
@@ -140,7 +161,7 @@ async function bootstrap() {
     limits: { fileSize: 120 * 1024 * 1024 },
   });
   const server = createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws/stream' });
+  const streamWss = new WebSocketServer({ noServer: true });
 
   let config = await loadConfig();
   const providerHealthRefreshMs = config.providerHealth?.refreshMs ?? 5_000;
@@ -154,11 +175,14 @@ async function bootstrap() {
   } as const;
   const storage = createStorage(config.storage.driver, config.storage.path, retention);
   const realtimeLatencyStore = createRealtimeStorage(config.storage.driver, config.storage.path, retention);
+  const realtimeTranscriptLogStore = createRealtimeTranscriptStore(config.storage.path, retention);
+  const replaySessionStore = new ReplaySessionStore();
   const jobHistory = new JobHistory(storage);
   await jobHistory.init();
   const batchRunner = new BatchRunner(storage, jobHistory);
   await batchRunner.init();
   await realtimeLatencyStore.init();
+  await realtimeTranscriptLogStore.init();
   logger.info({ event: 'providers_status', providers: initialProviders });
 
   const allowedOrigins = parseAllowedOrigins();
@@ -305,13 +329,54 @@ async function bootstrap() {
   });
 
   app.get('/api/realtime/latency', createRealtimeLatencyHandler(realtimeLatencyStore));
+  app.get('/api/realtime/log-sessions', createRealtimeLogSessionsHandler(realtimeTranscriptLogStore));
+  app.get('/api/realtime/logs/:sessionId', async (req, res, next) => {
+    try {
+      const { sessionId } = req.params;
+      if (!sessionId) {
+        res.status(400).json({ message: 'sessionId is required' });
+        return;
+      }
+      const entries = await realtimeTranscriptLogStore.readSession(sessionId);
+      if (entries.length === 0) {
+        res.status(404).json({ message: 'session log not found' });
+        return;
+      }
+      res.json(entries);
+    } catch (error) {
+      next(error as Error);
+    }
+  });
+
+  app.post('/api/realtime/replay', upload.single('file'), async (req, res, next) => {
+    try {
+      const providerAvailability = await providerStatusCache.get();
+      const provider = req.body.provider as ProviderId;
+      const lang = (req.body.lang as string) ?? '';
+      if (!provider || !lang) {
+        throw new HttpError(400, 'provider and lang are required for replay');
+      }
+      if (!req.file) {
+        throw new HttpError(400, 'audio file is required for replay');
+      }
+      requireProviderAvailable(providerAvailability, provider, 'streaming');
+      const session = replaySessionStore.create(req.file, provider, lang);
+      res.json({ sessionId: session.id, filename: session.originalName, createdAt: session.createdAt });
+    } catch (error) {
+      if (error instanceof HttpError) {
+        res.status(error.statusCode).json(error.payload ?? { message: error.message });
+        return;
+      }
+      next(error);
+    }
+  });
 
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     logger.error({ event: 'server_error', message: err.message });
     res.status(500).json({ message: err.message });
   });
 
-  wss.on('connection', (ws, req) => {
+  streamWss.on('connection', (ws, req) => {
     const url = new URL(req.url ?? '', 'http://localhost');
     const provider = url.searchParams.get('provider') as ProviderId;
     const lang = url.searchParams.get('lang') ?? 'ja-JP';
@@ -343,7 +408,13 @@ async function bootstrap() {
       }
 
       try {
-        await handleStreamConnection(ws, provider, lang, realtimeLatencyStore);
+        await handleStreamConnection(
+          ws,
+          provider,
+          lang,
+          realtimeLatencyStore,
+          realtimeTranscriptLogStore
+        );
       } catch (error) {
         logger.error({ event: 'ws_handler_error', message: error.message });
         sendWsError(error.message ?? 'streaming handler error');
@@ -352,6 +423,73 @@ async function bootstrap() {
       logger.error({ event: 'ws_handler_error', message: error.message });
       sendWsError(error.message ?? 'streaming connection error');
     });
+  });
+
+  const replayWss = new WebSocketServer({ noServer: true });
+
+  replayWss.on('connection', (ws, req) => {
+    const url = new URL(req.url ?? '', 'http://localhost');
+    const provider = url.searchParams.get('provider') as ProviderId;
+    const lang = url.searchParams.get('lang') ?? 'ja-JP';
+    const sessionId = url.searchParams.get('sessionId');
+    const origin = req.headers.origin;
+    const allowedOrigins = parseAllowedOrigins();
+
+    const sendWsError = (message: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'error', message }));
+      }
+      ws.close();
+    };
+
+    if (!isOriginAllowed(origin, allowedOrigins)) {
+      sendWsError('origin not allowed');
+      return;
+    }
+    if (!provider) {
+      sendWsError('provider query param is required');
+      return;
+    }
+    if (!sessionId) {
+      sendWsError('sessionId query param is required');
+      return;
+    }
+
+    (async () => {
+      const providerAvailability = await providerStatusCache.get();
+      try {
+        requireProviderAvailable(providerAvailability, provider, 'streaming');
+        await handleReplayConnection(
+          ws,
+          provider,
+          lang,
+          sessionId,
+          replaySessionStore,
+          realtimeLatencyStore,
+          realtimeTranscriptLogStore
+        );
+      } catch (error) {
+        logger.error({ event: 'ws_replay_error', message: (error as Error).message });
+        sendWsError((error as Error).message ?? 'replay handler error');
+      }
+    })().catch((error) => {
+        logger.error({ event: 'ws_replay_error', message: error.message });
+        sendWsError(error.message ?? 'replay connection error');
+      });
+  });
+
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url ?? '', 'http://localhost');
+    if (url.pathname === '/ws/stream') {
+      streamWss.handleUpgrade(req, socket, head, (ws) => streamWss.emit('connection', ws, req));
+      return;
+    }
+    if (url.pathname === '/ws/replay') {
+      replayWss.handleUpgrade(req, socket, head, (ws) => replayWss.emit('connection', ws, req));
+      return;
+    }
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
   });
 
   const port = Number(

@@ -51,7 +51,7 @@ export class JsonlStore<T> implements StorageDriver<T> {
       .reverse();
   }
 
-  private async maybePrune(sampleRecord?: T): Promise<void> {
+  private async maybePrune(_sampleRecord?: T): Promise<void> {
     if (!this.retentionMs && !this.maxRows) return;
     const now = Date.now();
     if (now - this.lastPruned < this.pruneIntervalMs) return;
@@ -83,7 +83,8 @@ export class JsonlStore<T> implements StorageDriver<T> {
   }
 
   private extractTimestamp(row: T): number | null {
-    const candidate = (row as any).createdAt ?? (row as any).endedAt ?? (row as any).startedAt;
+    const candidateRecord = row as { createdAt?: string; endedAt?: string; startedAt?: string };
+    const candidate = candidateRecord.createdAt ?? candidateRecord.endedAt ?? candidateRecord.startedAt;
     const ts = candidate ? Date.parse(candidate as string) : NaN;
     return Number.isFinite(ts) ? ts : null;
   }

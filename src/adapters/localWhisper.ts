@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import type { BatchResult, StreamingOptions, StreamingSession } from '../types.js';
+import type { BatchResult, StreamingOptions, StreamingSession, TranscriptWord } from '../types.js';
 import { BaseAdapter } from './base.js';
 import { normalizeWhisperLanguage } from '../utils/language.js';
 import { getWhisperRuntime } from '../utils/whisper.js';
@@ -134,7 +134,7 @@ export class LocalWhisperAdapter extends BaseAdapter {
     }
   }
 
-  private async runWhisper(pythonPath: string, wavPath: string, language: string): Promise<any> {
+  private async runWhisper(pythonPath: string, wavPath: string, language: string): Promise<WhisperRunResult> {
     const whisperEnv = {
       ...process.env,
       PYTHONUNBUFFERED: '1',
@@ -168,10 +168,59 @@ export class LocalWhisperAdapter extends BaseAdapter {
       throw new Error(`Whisper returned empty output${stderr ? `: ${stderr}` : ''}`);
     }
 
-    try {
-      return JSON.parse(payloadText);
-    } catch (err) {
-      throw new Error(`Failed to parse Whisper output: ${(err as Error).message}. Output: ${payloadText}`);
-    }
+    return parseWhisperResult(payloadText);
   }
+}
+
+interface WhisperRunResult {
+  text: string;
+  words?: TranscriptWord[];
+  durationSec?: number;
+  vendorProcessingMs?: number;
+  language?: string | null;
+}
+
+type WhisperWordSource = {
+  start?: number;
+  end?: number;
+  startSec?: number;
+  endSec?: number;
+  t0?: number;
+  t1?: number;
+  word?: string;
+  text?: string;
+  confidence?: number | null;
+};
+
+const toTranscriptWord = (word: WhisperWordSource): TranscriptWord => ({
+  startSec: Number(word.startSec ?? word.start ?? word.t0 ?? 0),
+  endSec: Number(word.endSec ?? word.end ?? word.t1 ?? 0),
+  text: String(word.text ?? word.word ?? '').trim(),
+  confidence: typeof word.confidence === 'number' ? word.confidence : undefined,
+});
+
+function parseWhisperResult(raw: string): WhisperRunResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Failed to parse Whisper output: ${(err as Error).message}. Output: ${raw}`);
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`Whisper returned unexpected payload: ${raw}`);
+  }
+  const payload = parsed as Record<string, unknown>;
+  const words =
+    Array.isArray(payload.words)
+      ? payload.words
+          .filter((w): w is WhisperWordSource => typeof w === 'object' && w !== null)
+          .map(toTranscriptWord)
+      : undefined;
+  return {
+    text: typeof payload.text === 'string' ? payload.text : '',
+    words,
+    durationSec: typeof payload.durationSec === 'number' ? payload.durationSec : undefined,
+    vendorProcessingMs: typeof payload.vendorProcessingMs === 'number' ? payload.vendorProcessingMs : undefined,
+    language: typeof payload.language === 'string' ? payload.language : null,
+  };
 }

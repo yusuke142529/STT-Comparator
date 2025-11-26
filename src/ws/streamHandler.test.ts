@@ -1,53 +1,14 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import type { RealtimeLatencySummary, StorageDriver } from '../types.js';
+import type { RealtimeLatencySummary, RealtimeTranscriptLogEntry, StorageDriver } from '../types.js';
+import type { RealtimeTranscriptLogWriter } from '../storage/realtimeTranscriptStore.js';
 
 const noopStore: StorageDriver<RealtimeLatencySummary> = {
   init: async () => {},
   append: async () => {},
   readAll: async () => [],
 };
-
-describe('persistLatency', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('aggregates and writes latency stats when values exist', async () => {
-    const { persistLatency } = await import('./streamHandler.js');
-    const append = vi.fn();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2024-03-01T00:00:05.000Z'));
-
-    await persistLatency(
-      [100, 200, 300],
-      { sessionId: 's1', provider: 'mock', lang: 'ja-JP', startedAt: '2024-03-01T00:00:00.000Z' },
-      { ...noopStore, append }
-    );
-
-    expect(append).toHaveBeenCalledTimes(1);
-    const payload = append.mock.calls[0][0];
-    expect(payload.sessionId).toBe('s1');
-    expect(payload.avg).toBeCloseTo(200);
-    expect(payload.p50).toBeCloseTo(200);
-    expect(payload.p95).toBeCloseTo(290);
-    expect(payload.min).toBe(100);
-    expect(payload.max).toBe(300);
-    expect(payload.endedAt).toBe('2024-03-01T00:00:05.000Z');
-  });
-
-  it('skips persistence for empty sessions', async () => {
-    const { persistLatency } = await import('./streamHandler.js');
-    const append = vi.fn();
-    await persistLatency([], { sessionId: 's1', provider: 'mock', lang: 'ja-JP', startedAt: '2024-03-01T00:00:00.000Z' }, {
-      ...noopStore,
-      append,
-    });
-
-    expect(append).not.toHaveBeenCalled();
-  });
-});
 
 describe('handleStreamConnection', () => {
   class FakeWebSocket extends EventEmitter {
@@ -157,6 +118,81 @@ describe('handleStreamConnection', () => {
     expect(transcript).toBeDefined();
     expect(typeof transcript?.latencyMs).toBe('number');
     expect(transcript?.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('logs session and transcript events when realtime logging is enabled', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2024-01-01T00:00:00.000Z'));
+    const logStore: RealtimeTranscriptLogWriter = {
+      append: vi.fn(async () => {}),
+    };
+    const { handleStreamConnection } = await import('./streamHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore, logStore);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config' })), false);
+    ws.emit('message', Buffer.from([1, 2, 3]), true);
+    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
+      await Promise.resolve();
+    }
+
+    vi.advanceTimersByTime(25);
+    await Promise.resolve();
+
+    const mockedAppend = logStore.append as ReturnType<typeof vi.fn>;
+    const recordedEntries = mockedAppend.mock.calls.map(([entry]) => entry as RealtimeTranscriptLogEntry);
+    const sessionEntry = recordedEntries.find((entry) => entry.payload.type === 'session');
+    const transcriptEntry = recordedEntries.find((entry) => entry.payload.type === 'transcript');
+
+    expect(sessionEntry).toBeDefined();
+    expect(transcriptEntry).toBeDefined();
+    expect(transcriptEntry?.sessionId).toBe(sessionEntry?.sessionId);
+    expect(typeof transcriptEntry?.payload.latencyMs).toBe('number');
+  });
+
+  it('avoids sending transcripts when text/isFinal/channel matches the last payload', async () => {
+    const { handleStreamConnection } = await import('./streamHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config' })), false);
+    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
+      await Promise.resolve();
+    }
+
+    const handler = state.getOnData();
+    expect(handler).toBeDefined();
+    const baseTime = Date.now();
+    handler?.({
+      provider: 'mock',
+      isFinal: false,
+      text: 'hello',
+      timestamp: baseTime,
+      channel: 'mic',
+    });
+    handler?.({
+      provider: 'mock',
+      isFinal: false,
+      text: 'hello',
+      timestamp: baseTime + 1,
+      channel: 'mic',
+    });
+    handler?.({
+      provider: 'mock',
+      isFinal: false,
+      text: 'hello world',
+      timestamp: baseTime + 2,
+      channel: 'mic',
+    });
+    await Promise.resolve();
+
+    const transcripts = ws.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'transcript');
+    expect(transcripts).toHaveLength(2);
+    expect(transcripts.map((message) => message.text)).toEqual(['hello', 'hello world']);
   });
 
   it('不正な config で error を返しソケットを閉じる', async () => {

@@ -4,22 +4,28 @@ import { loadConfig } from '../config.js';
 import { getAdapter } from '../adapters/index.js';
 import { logger } from '../logger.js';
 import { spawnPcmTranscoder } from '../utils/ffmpeg.js';
+import { bufferToArrayBuffer } from '../utils/buffer.js';
+import { persistLatency } from '../utils/latency.js';
 import { streamingConfigMessageSchema } from '../validation.js';
 import type {
   ProviderId,
+  RealtimeLogPayload,
+  RealtimeLatencySummary,
+  RealtimeTranscriptLogEntry,
   StreamingConfigMessage,
   StreamErrorMessage,
   StreamTranscriptMessage,
   StreamSessionMessage,
-  RealtimeLatencySummary,
   StorageDriver,
 } from '../types.js';
+import type { RealtimeTranscriptLogWriter } from '../storage/realtimeTranscriptStore.js';
 
 export async function handleStreamConnection(
   ws: WebSocket,
   provider: ProviderId,
   lang: string,
-  latencyStore: StorageDriver<RealtimeLatencySummary>
+  latencyStore: StorageDriver<RealtimeLatencySummary>,
+  logStore?: RealtimeTranscriptLogWriter
 ) {
   const config = await loadConfig();
   const adapter = getAdapter(provider);
@@ -48,16 +54,40 @@ export async function handleStreamConnection(
   let lastAudioSentAt: number | null = null;
   const sessionId = randomUUID();
   const latencies: number[] = [];
+  let lastTranscriptSignature: string | null = null;
   const startedAt = new Date().toISOString();
   const maxQueueBytes = config.ws?.maxPcmQueueBytes ?? 5 * 1024 * 1024;
   let closed = false;
+  const recordLog = (payload: RealtimeLogPayload) => {
+    if (!logStore) return;
+    const entry: RealtimeTranscriptLogEntry = {
+      sessionId,
+      provider,
+      lang,
+      recordedAt: new Date().toISOString(),
+      payload,
+    };
+    void logStore
+      .append(entry)
+      .catch((error) => logger.error({ event: 'realtime_log_error', message: error.message }));
+  };
+
+  const buildTranscriptSignature = (payload: StreamTranscriptMessage): string =>
+    `${payload.channel}:${payload.isFinal ? 'final' : 'interim'}:${payload.text}`;
+
+  const shouldEmitTranscript = (payload: StreamTranscriptMessage): boolean => {
+    const signature = buildTranscriptSignature(payload);
+    if (lastTranscriptSignature === signature) {
+      return false;
+    }
+    lastTranscriptSignature = signature;
+    return true;
+  };
 
   function sendJson(payload: StreamTranscriptMessage | StreamErrorMessage | StreamSessionMessage) {
     ws.send(JSON.stringify(payload));
+    recordLog(payload);
   }
-
-  const bufferToArrayBuffer = (buffer: Buffer): ArrayBuffer =>
-    buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 
   async function flushQueue() {
     if (!controller) return;
@@ -141,6 +171,9 @@ export async function handleStreamConnection(
               channel: transcript.channel ?? 'mic',
               latencyMs,
             };
+            if (!shouldEmitTranscript(payload)) {
+              return;
+            }
             sendJson(payload);
           });
           streamingSession.onError((err) => {
@@ -183,6 +216,7 @@ export async function handleStreamConnection(
         },
         latencyStore
       ).catch((error) => logger.error({ event: 'latency_persist_error', message: error.message }));
+      recordLog({ type: 'session_end', endedAt: new Date().toISOString() });
     })();
   });
 
@@ -203,46 +237,4 @@ function normalizeRawData(data: RawData): Buffer {
     return Buffer.concat(data);
   }
   return Buffer.from(data as ArrayBuffer);
-}
-
-function summarizeLatency(values: number[]) {
-  if (values.length === 0) {
-    return { count: 0, avg: null, p50: null, p95: null, min: null, max: null };
-  }
-  const sorted = [...values].sort((a, b) => a - b);
-  const quantile = (q: number) => {
-    const pos = (sorted.length - 1) * q;
-    const base = Math.floor(pos);
-    const rest = pos - base;
-    if (sorted[base + 1] !== undefined) return sorted[base] + rest * (sorted[base + 1] - sorted[base]);
-    return sorted[base];
-  };
-  const avg = values.reduce((a, b) => a + b, 0) / values.length;
-  return {
-    count: values.length,
-    avg,
-    p50: quantile(0.5),
-    p95: quantile(0.95),
-    min: sorted[0],
-    max: sorted[sorted.length - 1],
-  };
-}
-
-export async function persistLatency(
-  values: number[],
-  meta: { sessionId: string; provider: ProviderId; lang: string; startedAt: string },
-  store?: StorageDriver<RealtimeLatencySummary>
-) {
-  if (!store) return;
-  const endedAt = new Date().toISOString();
-  const stats = summarizeLatency(values);
-  if (stats.count === 0) return;
-  await store.append({
-    sessionId: meta.sessionId,
-    provider: meta.provider,
-    lang: meta.lang,
-    startedAt: meta.startedAt,
-    endedAt,
-    ...stats,
-  });
 }

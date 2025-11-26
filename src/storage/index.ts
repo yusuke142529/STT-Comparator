@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { JsonlStore } from './jsonlStore.js';
 import { SqliteStore } from './sqliteStore.js';
 import { RealtimeSqliteStore } from './realtimeSqliteStore.js';
+import { RealtimeTranscriptStore } from './realtimeTranscriptStore.js';
 import type { StorageDriver, StorageDriverName, BatchJobFileResult, RealtimeLatencySummary } from '../types.js';
 import type { RetentionPolicy } from './retention.js';
 
@@ -44,4 +45,12 @@ export function createRealtimeStorage(
   }
   const dbPath = path.resolve(storagePath, 'results.sqlite');
   return new RealtimeSqliteStore(dbPath, getOrCreateDatabase(dbPath), retention);
+}
+
+export function createRealtimeTranscriptStore(
+  storagePath: string,
+  retention?: RetentionPolicy
+): RealtimeTranscriptStore {
+  const filePath = path.resolve(storagePath, 'realtime-logs.jsonl');
+  return new RealtimeTranscriptStore(filePath, retention);
 }

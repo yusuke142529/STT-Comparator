@@ -44,7 +44,11 @@
   cp .env.example .env
   ```
   - Deepgram を有効化するには `.env` に `DEEPGRAM_API_KEY` を入れてサーバを再起動するだけでOK。既定ポートは 4100（`SERVER_PORT` で変更可能、フロントは `VITE_API_BASE_URL` と Vite proxy がそれに追従します）。
-4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `local_whisper`, `whisper_streaming`。手元検証用に `mock` を追加することもできます）。必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。
+4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`。手元検証用に `mock` を追加することもできます）。`elevenlabs` を使うには `.env` に `ELEVENLABS_API_KEY` を設定してください（バッチ実行のタイムアウトや再試行は以下のオプションでチューニング可能です）。
+  - `ELEVENLABS_BATCH_TIMEOUT_MS`: 初期リクエストのタイムアウト（既定 60000ms）。
+  - `ELEVENLABS_BATCH_MAX_ATTEMPTS`: 一時的な 408/429/5xx への再試行回数（既定 3 回）。
+  - `ELEVENLABS_BATCH_BASE_DELAY_MS` / `ELEVENLABS_BATCH_MAX_DELAY_MS`: 再試行間隔の指数バックオフを制御します（既定 1000ms / 5000ms）。
+必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。
   - `providerHealth.refreshMs` で `/api/providers` のヘルスチェック結果のキャッシュ期間（ミリ秒）を調整できます。デフォルト 5000ms により、`whisper_streaming` などのローカル ASR サービスを起動した直後でも UI が利用可能に切り替えられ、必要があれば `/api/admin/reload-config` を呼んで即座に再評価させられます。
 
 ### Whisper Streaming（faster-whisper-server, ローカル常駐）
@@ -86,6 +90,7 @@
 
 - サーバ単体（API + WS + static 配信）: `pnpm run dev:server`
 - UI 単体（Vite Dev Server, http://localhost:5173）: `pnpm run dev:client`
+  - `pnpm run dev:client` now waits for or automatically spawns `pnpm run dev:server` so the React app never sees `ERR_CONNECTION_REFUSED`; the stack script sets `STT_COMPARATOR_BACKEND_MANAGED=1` before launching the client so it does not spawn a duplicate server when you run `pnpm run dev`.
 - フルスタック（サーバ + UI 同時）: `pnpm run dev`
 - ビルド: `pnpm run build`（サーバをコンパイルし、UI を `client/dist` → `public/` へ出力、デフォルトで `COREPACK_HOME=.corepack-cache` を使用）
 - 本番起動: `pnpm start`
@@ -101,6 +106,22 @@ UI ビルド後は `public/` に生成されたファイルを Express が配信
 - UI では punctuation policy（none/basic/full）を選択して送信でき、プロバイダ側の句読点挿入挙動を条件として比較可能。
 - `GET /api/providers` — 現在のプロバイダ有効/無効状態を返却（Deepgram キー未設定などを UI で案内）。この API は現在のプロバイダヘルスを逐次再評価し `providerHealth.refreshMs` ミリ秒ごとにキャッシュを更新するため、ローカルの `whisper_streaming` サーバを起動した後でも数秒以内に UI に「利用可能」と反映されます。
 - `GET /api/realtime/latency?limit=20` — 直近の realtime セッションのレイテンシ集計（avg/p50/p95/min/max, count, provider/lang）を返却。
+- `GET /api/realtime/logs/:sessionId` — `session/transcript/error/session_end` の t と `latencyMs` を含むイベントを時系列で返す。ログは `config.json` の `storage.path` 配下 `runs/<date>/realtime-logs.jsonl` に JSONL 形式で蓄積され、生成AIなどにそのまま送れる診断シーケンスとして使える。
+
+### Realtime replay helper
+
+`scripts/realtime-replay.ts` はブラウザの `MediaRecorder` → `/ws/stream` → FFmpeg/Adapter 経路を TypeScript で再現し、音声ファイルを `ffmpeg -re` で WebM/Opus に変換して WS に流し込みます。物理マイクが使えない静音環境でも、provider・言語・マニフェストファイルを切り替えながら latency や transcripts を再現性高く検証できます。`pnpm replay:realtime` から起動でき、`--file sample-data/your.wav` や `--manifest sample-data/manifest.example.json` といった引数で対象を指定します。
+
+- **UI 内部再生**: Realtime タブには「入力ソース」トグルが入り、マイクのほか「内部ファイル再生」を選べます。ファイルを選ぶと UI は `/api/realtime/replay` に音声をアップロードし、返却された `sessionId` を使って `/ws/replay` に接続するため、マイクなしで同じストリーミング経路（FFmpeg → Adapter）を検証できます。CLI ヘルパーと併用して再現性を上げるのが推奨です。
+
+- **CLI の主要オプション**
+  - `--provider`/`--language`: 送信先と BCP-47
+  - `--file`（repeatable）: 単一音源
+  - `--manifest`: `audio`/`ref` を持つ manifest（`sample-data/manifest.example.json`）
+  - `--enable-interim`, `--normalize-preset`, `--punctuation`, `--context`, `--dictionary`: UI と同じ StreamingConfig の制御
+  - `--ffmpeg-path`/`--dry-run`: FFmpeg 実行パスと config の検証
+
+スクリプトは `StreamTranscriptMessage` を受信するたびに `transcript`, `latencyMs`, `isFinal` を出力し、終了後に平均・p95・最大 latency を集計します。Deepgram を使うには `.env` に `DEEPGRAM_API_KEY`、`whisper_streaming` では faster-whisper-server を起動済みで `WHISPER_STREAMING_READY_URL` が通る状態にしておいてください。`mock` でまず挙動を確認したうえで本物プロバイダや `GET /api/realtime/latency?limit=20` との突合を行うと、静音環境でも本番相当の検証が可能です。
 
 詳細なスキーマは仕様書（`src/types.ts`）と README のリンク箇所を参照してください。
 

@@ -8,7 +8,12 @@ const mapPermissionState = (state: PermissionState | string | undefined): Microp
   return 'prompt';
 };
 
-export function useMicrophonePermission() {
+export interface UseMicrophonePermissionResult {
+  status: MicrophonePermissionStatus;
+  refresh: () => Promise<void>;
+}
+
+export function useMicrophonePermission(): UseMicrophonePermissionResult {
   const [status, setStatus] = useState<MicrophonePermissionStatus>('unknown');
   const permissionRef = useRef<PermissionStatus | null>(null);
 
