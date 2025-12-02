@@ -198,6 +198,13 @@ export interface AppConfig {
     targetChannels: number;
     chunkMs: number;
   };
+  ingressNormalize?: {
+    enabled?: boolean;
+    targetSampleRate?: number;
+    targetChannels?: number;
+    peakDbfs?: number;
+    maxDurationSec?: number;
+  };
   normalization: NormalizationConfig;
   storage: {
     driver: StorageDriverName;

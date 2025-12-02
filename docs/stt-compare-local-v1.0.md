@@ -88,7 +88,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 ## 7. モジュール構成と責務
 - Web UI: マイク制御、WS接続、部分／確定表示、条件選択、バッチ評価UI、結果可視化。
   - 句読点ポリシー（none/basic/full）をUIで切替可能。
-- Transmux: webm/opus → FFmpeg → PCM(16k mono, linear16) 変換し Adapter に送る。
+- Transmux: webm/opus → FFmpeg → PCM(16k mono, linear16) 変換し Adapter に送る。preview/replay/batch のアップロードファイルも受信直後に FFmpeg の strict フラグ（`-v error -xerror -err_detect explode` など）で 16k mono PCM WAV に正規化し、デコードエラーや 100ms 未満の出力しか得られない壊れた音源は 400 で拒否する。正規化パラメータは `config.json.ingressNormalize`（サンプルレート/チャンネル/ピークヘッドルーム）で統一管理し、`AUDIO_UNSUPPORTED_FORMAT` を UI へ返して再試行を促す。
 - Router: ProviderId 解決、セッションライフサイクル管理、コンテキスト管理。
 - Provider Adapter: API/SDK/WS/gRPC への接続、PCM送信、結果正規化、supportsStreaming/batch を表現。
 - Scoring: 正規化、CER/WER/RTF 算出、レイテンシ算出、p50/p95 集計。

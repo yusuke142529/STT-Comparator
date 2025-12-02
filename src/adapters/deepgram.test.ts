@@ -207,4 +207,46 @@ describe('DeepgramAdapter batch', () => {
     expect(parsed.searchParams.get('endpointing')).toBe('400');
     expect(parsed.searchParams.get('vad_events')).toBe('true');
   });
+
+  it('集計レスポンスでも transcripts/utterances をすべて拾える', async () => {
+    const { DeepgramAdapter } = await import('./deepgram.js');
+    const adapter = new DeepgramAdapter();
+    const stream = new Readable({
+      read() {
+        this.push(Buffer.from('test'));
+        this.push(null);
+      },
+    });
+    const fakeResponse = {
+      ok: true,
+      status: 200,
+      json: vi.fn(async () => ({
+        results: {
+          alternatives: [
+            { transcript: 'alpha', words: [{ start: 0, end: 0.1, word: 'alpha' }] },
+          ],
+          utterances: [{ transcript: 'utter' }],
+        },
+        utterances: [{ transcript: 'global' }],
+        metadata: { duration: 1, processing_ms: 10 },
+      })),
+      text: vi.fn(async () => ''),
+    } as unknown as Response;
+    const globalWithFetch = globalThis as typeof globalThis & { fetch: typeof fetch };
+    const originalFetch = globalWithFetch.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse) as typeof fetch;
+    globalWithFetch.fetch = fetchMock;
+
+    try {
+      const result = await adapter.transcribeFileFromPCM(stream, {
+        language: 'ja-JP',
+        sampleRateHz: 16000,
+        encoding: 'linear16',
+      });
+      expect(result.text).toBe('alpha utter global');
+      expect(result.words?.[0]?.text).toBe('alpha');
+    } finally {
+      globalWithFetch.fetch = originalFetch;
+    }
+  });
 });

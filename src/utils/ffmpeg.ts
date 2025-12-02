@@ -18,8 +18,19 @@ export function spawnPcmTranscoder(
   const transcoder = spawn(
     ffmpegPath,
     [
+      '-nostdin',
+      '-hide_banner',
+      '-v',
+      'error',
+      '-xerror',
+      '-err_detect',
+      'explode',
       '-f',
       'webm',
+      '-fflags',
+      '+genpts',
+      '-use_wallclock_as_timestamps',
+      '1',
       '-i',
       'pipe:0',
       '-ac',
@@ -64,6 +75,13 @@ export async function convertToPcmReadable(
   const transcoder = spawn(
     ffmpegPath,
     [
+      '-nostdin',
+      '-hide_banner',
+      '-v',
+      'error',
+      '-xerror',
+      '-err_detect',
+      'explode',
       '-i',
       'pipe:0',
       '-ac',
@@ -117,4 +135,42 @@ export async function convertToPcmReadable(
     transcoder.kill('SIGKILL');
   });
   return { stream, durationPromise };
+}
+
+export async function transcodeFileToPcmWav(options: {
+  inputPath: string;
+  outputPath: string;
+  sampleRate: number;
+  channels: number;
+}): Promise<void> {
+  const ffmpegPath = ffmpegInstaller.path;
+  const args = [
+    '-nostdin',
+    '-hide_banner',
+    '-v',
+    'error',
+    '-xerror',
+    '-err_detect',
+    'explode',
+    '-i',
+    options.inputPath,
+    '-ac',
+    String(options.channels),
+    '-ar',
+    String(options.sampleRate),
+    '-f',
+    'wav',
+    options.outputPath,
+  ];
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'inherit'] });
+    proc.once('error', (err) => reject(err));
+    proc.once('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`ffmpeg exited with code ${code ?? 'unknown'}`));
+      }
+    });
+  });
 }

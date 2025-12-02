@@ -1,6 +1,7 @@
 import { ChangeEvent, Dispatch, SetStateAction, useMemo, useState } from 'react';
 import { Icons } from '../../components/icons';
-import type { JobStatus, PunctuationPolicy, ProviderInfo, SubmitBatchInput } from '../../types/app';
+import { fmt } from '../../utils/metrics';
+import type { FileResult, JobStatus, PunctuationPolicy, ProviderInfo, SubmitBatchInput } from '../../types/app';
 
 interface BatchViewProps {
   provider: string;
@@ -19,6 +20,8 @@ interface BatchViewProps {
   jobStatus: JobStatus | null;
   jobError: string | null;
   isBatchRunning: boolean;
+  jobResults: FileResult[];
+  lastJobId: string | null;
 }
 
 export const BatchView = ({
@@ -38,6 +41,8 @@ export const BatchView = ({
   jobStatus,
   jobError,
   isBatchRunning,
+  jobResults,
+  lastJobId,
 }: BatchViewProps) => {
   const [files, setFiles] = useState<FileList | null>(null);
   const [manifestJson, setManifestJson] = useState('');
@@ -68,6 +73,12 @@ export const BatchView = ({
       parallel,
     });
   };
+
+  const transcriptEntries = useMemo(() => jobResults, [jobResults]);
+  const displayJobId = lastJobId ?? jobStatus?.jobId;
+  const transcriptHeading = displayJobId
+    ? `Job ${displayJobId.slice(0, 8)} の文字起こし`
+    : '最新の文字起こし結果';
 
   return (
     <section className="card">
@@ -170,6 +181,47 @@ export const BatchView = ({
           <div>{jobError}</div>
           <button className="btn btn-ghost" onClick={handleSubmit} disabled={isBatchRunning}>リトライ</button>
         </div>
+      )}
+
+      {transcriptEntries.length > 0 && (
+        <section className="card transcript-card" style={{ marginTop: '2rem' }}>
+          <div className="transcript-card__header">
+            <div>
+              <h3>{transcriptHeading}</h3>
+              <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
+                JSON/CSV出力せずにジョブ内の文字起こしを直接確認できます。
+              </p>
+            </div>
+          </div>
+
+          <div className="transcript-list">
+            {transcriptEntries.map((entry, index) => {
+              const text = entry.text?.trim() ? entry.text : '（文字起こしデータなし）';
+              return (
+                <details
+                  key={`${entry.provider}-${entry.path}-${index}`}
+                  className="transcript-entry"
+                  open={index === 0}
+                >
+                  <summary>
+                    <div className="transcript-entry__meta">
+                      <span className="transcript-entry__path">{entry.path}</span>
+                      <span className="msg-provider">{entry.provider}</span>
+                    </div>
+                    <div className="transcript-entry__metrics">
+                      {entry.cer != null && <span>CER: {fmt(entry.cer)}</span>}
+                      {entry.wer != null && <span>WER: {fmt(entry.wer)}</span>}
+                      {entry.rtf != null && <span>RTF: {fmt(entry.rtf)}</span>}
+                    </div>
+                  </summary>
+                  <div className="transcript-entry__text" aria-live="polite">
+                    {text}
+                  </div>
+                </details>
+              );
+            })}
+          </div>
+        </section>
       )}
     </section>
   );

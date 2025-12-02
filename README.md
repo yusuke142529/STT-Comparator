@@ -7,7 +7,7 @@
 
 - **Server**: Node.js 20 + Express + WebSocket（`src/` 直下, 既定ポート 4100）
 - **UI**: Vite + React + TypeScript（`client/`、Results タブにプロバイダフィルタと p50/p95 の簡易チャート、Realtime にレイテンシ p50/p95 と履歴テーブル）
-- **Audio**: FFmpeg（`@ffmpeg-installer/ffmpeg`）で webm/opus → PCM (16k mono linear16)
+- **Audio**: FFmpeg（`@ffmpeg-installer/ffmpeg`）で webm/opus → PCM (16k mono linear16)。アップロード音源もサーバ側で必ず 16k mono PCM WAV に正規化し、デコードエラーや極端に短い/壊れたファイルは 400 で即時拒否します。
 - **Scoring**: 独自 CER/WER/RTF 実装、正規化プリセット
 - **Storage**: JSONL 永続化（SQLite ドライバも実装済み; storage.driver で切替）
 
@@ -15,7 +15,7 @@
 
 ```
 ├── src/                  # ローカルサーバ（Express/WS）
-│   ├── adapters/         # Provider Adapter 実装（deepgram / local_whisper / whisper_streaming。mock は任意のスタブ）
+│   ├── adapters/         # Provider Adapter 実装（deepgram / local_whisper / whisper_streaming / openai。mock は任意のスタブ）
 │   ├── jobs/             # バッチ実行・スコアリング
 │   ├── scoring/          # CER/WER/RTF と正規化
 │   ├── storage/          # JSONL/SQLite ドライバ, CSVエクスポータ
@@ -44,7 +44,7 @@
   cp .env.example .env
   ```
   - Deepgram を有効化するには `.env` に `DEEPGRAM_API_KEY` を入れてサーバを再起動するだけでOK。既定ポートは 4100（`SERVER_PORT` で変更可能、フロントは `VITE_API_BASE_URL` と Vite proxy がそれに追従します）。
-4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`。手元検証用に `mock` を追加することもできます）。`elevenlabs` を使うには `.env` に `ELEVENLABS_API_KEY` を設定してください（バッチ実行のタイムアウトや再試行は以下のオプションでチューニング可能です）。
+4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`, `openai`。手元検証用に `mock` を追加することもできます）。`elevenlabs` を使うには `.env` に `ELEVENLABS_API_KEY` を設定してください（バッチ実行のタイムアウトや再試行は以下のオプションでチューニング可能です）。
   - `ELEVENLABS_BATCH_TIMEOUT_MS`: 初期リクエストのタイムアウト（既定 60000ms）。
   - `ELEVENLABS_BATCH_MAX_ATTEMPTS`: 一時的な 408/429/5xx への再試行回数（既定 3 回）。
   - `ELEVENLABS_BATCH_BASE_DELAY_MS` / `ELEVENLABS_BATCH_MAX_DELAY_MS`: 再試行間隔の指数バックオフを制御します（既定 1000ms / 5000ms）。
@@ -72,6 +72,13 @@
     ```
 - `whisper_streaming` は **Realtime / Batch の両方に対応** します。UI/Batch API から選択すると PCM(16k mono) をローカルサーバへ送信し、partial/final の文字起こしを受信します。
 - Deepgram など外部 API と同等にレイテンシ計測・公平性指標（p50/p95）が動作します。サーバ未起動時は `/api/providers` で unavailable 理由が返り、UI では選択不可・警告表示になります。
+
+### OpenAI Realtime / Transcribe（GPT-4o）
+
+- `.env` に `OPENAI_API_KEY` を設定すると Realtime/Bulk の両方で `openai` プロバイダが利用可能になります。キー未設定時は `/api/providers` が unavailable と返し、UI で選択不可になります。
+- ストリーミングは OpenAI Realtime API（intent=transcription, model=`gpt-4o-transcribe` 既定）を利用します。API が 24kHz PCM を要求するため、サーバ側で 16kHz → 24kHz にアップサンプリングして送出し、処理時間に含めます。VAD は server_vad（デフォルトON, `enableVad=false` で無効）。
+- バッチは Audio Transcriptions API（同モデル）に WAV ラップした 16kHz PCM を multipart で送信し、word-level timestamps が返れば UI/CSV に反映されます。
+- モデルは環境変数で切替可能: `OPENAI_STREAMING_MODEL`, `OPENAI_BATCH_MODEL`（例: `gpt-4o-mini-transcribe`）。
 
 ### ローカル Whisper (Python) を使う
 

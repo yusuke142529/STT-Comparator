@@ -128,4 +128,14 @@ describe('computeProviderAvailability feature flags', () => {
     expect(elevenlabs?.supportsPunctuationPolicy).toBe(false);
     expect(elevenlabs?.supportsContextPhrases).toBe(false);
   });
+
+  it('marks openai unavailable when API key is missing', async () => {
+    const config: AppConfig = { ...baseConfig, providers: ['openai'] };
+    delete process.env.OPENAI_API_KEY;
+    const result = await computeProviderAvailability(config);
+    const openai = result.find((p) => p.id === 'openai');
+    expect(openai).toBeDefined();
+    expect(openai?.available).toBe(false);
+    expect(openai?.reason).toContain('OPENAI_API_KEY');
+  });
 });

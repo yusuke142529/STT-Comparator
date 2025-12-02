@@ -195,7 +195,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           const text = await response.text();
           try {
             const parsed = JSON.parse(text);
-            throw new Error(parsed.message ?? '内部再生セッションの開始に失敗しました');
+            const detail = (parsed as any)?.detail ?? (parsed as any)?.message;
+            throw new Error(detail ?? '内部再生セッションの開始に失敗しました');
           } catch {
             throw new Error('内部再生セッションの開始に失敗しました');
           }

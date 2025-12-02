@@ -49,8 +49,11 @@ interface ControlPanelProps {
   replayAudioRef: RefObject<HTMLAudioElement>;
   replayAudioPlaying: boolean;
   onReplayAudioPlayChange: (playing: boolean) => void;
+  onReplayAudioError: () => void;
   previewPlaybackError: string | null;
+  previewPlaybackWarning: string | null;
   setPreviewPlaybackError: (value: string | null) => void;
+  previewTranscoding: boolean;
   punctuationOptions: PunctuationPolicy[];
   dictionary: string;
   setDictionary: Dispatch<SetStateAction<string>>;
@@ -104,8 +107,11 @@ export const ControlPanel = memo(({
   replayAudioRef,
   replayAudioPlaying,
   onReplayAudioPlayChange,
+  onReplayAudioError,
   previewPlaybackError,
+  previewPlaybackWarning,
   setPreviewPlaybackError,
+  previewTranscoding,
   dictionary,
   setDictionary,
   audioOutputDevices,
@@ -164,6 +170,9 @@ export const ControlPanel = memo(({
               ))}
             </select>
             {selectedProviderInfo?.reason && <p className="helper-text">{selectedProviderInfo.reason}</p>}
+            {selectedProviderInfo?.id === 'openai' && (
+              <p className="helper-text">OpenAI はサーバ側で 16kHz → 24kHz に変換して送信します（OPENAI_API_KEY が必要）。</p>
+            )}
             {realtimeNote && <p className="helper-text">{realtimeNote}</p>}
           </div>
           <div className="field">
@@ -244,7 +253,7 @@ export const ControlPanel = memo(({
                     onPause={() => onReplayAudioPlayChange(false)}
                     onEnded={() => onReplayAudioPlayChange(false)}
                     onError={() => {
-                      setPreviewPlaybackError('内部再生音声の再生に失敗しました。ページをリロードまたはファイルを再選択してください。');
+                      onReplayAudioError();
                       onReplayAudioPlayChange(false);
                     }}
                   />
@@ -253,6 +262,12 @@ export const ControlPanel = memo(({
                       ? '内部再生音声を再生中です'
                       : '再生ボタンで音声を確認できます。ストリーミング開始時にも自動再生されます。'}
                   </p>
+                  {previewTranscoding && (
+                    <p className="helper-text">ブラウザ非対応の形式でした。互換フォーマットへ変換中です…</p>
+                  )}
+                  {previewPlaybackWarning && (
+                    <p className="helper-text">{previewPlaybackWarning}</p>
+                  )}
                   {previewPlaybackError && (
                     <p className="helper-text">{previewPlaybackError}</p>
                   )}

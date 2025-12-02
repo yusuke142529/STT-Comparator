@@ -22,9 +22,19 @@ import type { ReplaySessionStore } from '../replay/replaySessionStore.js';
 import type { RealtimeTranscriptLogWriter } from '../storage/realtimeTranscriptStore.js';
 
 const buildFileTranscoderArgs = (filePath: string, sampleRate: number, channels: number) => [
+  '-nostdin',
+  '-hide_banner',
+  '-v',
+  'error',
+  '-xerror',
+  '-err_detect',
+  'explode',
   '-re',
   '-i',
   filePath,
+  '-vn',
+  '-sn',
+  '-dn',
   '-ac',
   String(channels),
   '-ar',
@@ -39,6 +49,7 @@ type FileTranscoder = {
   stop: () => void;
   onError: (cb: (err: Error) => void) => void;
   onClose: (cb: (code: number | null) => void) => void;
+  exitCode?: number | null;
 };
 
 function spawnFileTranscoder(filePath: string, sampleRate: number, channels: number): FileTranscoder {
@@ -92,6 +103,7 @@ export async function handleReplayConnection(
   let lastAudioSentAt: number | null = null;
   let closed = false;
   let configApplied = false;
+  let pcmBytes = 0;
 
   const recordLog = (payload: RealtimeLogPayload) => {
     if (!logStore) return;
@@ -164,8 +176,21 @@ export async function handleReplayConnection(
       );
 
       fileTranscoder.onError(handleFatal);
-      fileTranscoder.onClose(() => {
+      fileTranscoder.onClose((code) => {
         void (async () => {
+          const minBytes = Math.ceil(config.audio.targetSampleRate * config.audio.targetChannels * 2 * 0.1); // 100ms
+          if (code !== 0) {
+            handleFatal(new Error(`ffmpeg exited with code ${code ?? 'unknown'}`));
+            return;
+          }
+          if (pcmBytes < minBytes) {
+            handleFatal(
+              new Error(
+                'audio decoding produced almost no PCM samples (unsupported codec or corrupt file?)'
+              )
+            );
+            return;
+          }
           try {
             await controller?.end();
           } catch (err) {
@@ -185,6 +210,7 @@ export async function handleReplayConnection(
         } finally {
           fileTranscoder?.stream.resume();
         }
+        pcmBytes += chunk.length;
         const now = Date.now();
         if (!firstAudioSentAt) firstAudioSentAt = now;
         lastAudioSentAt = now;
@@ -194,7 +220,13 @@ export async function handleReplayConnection(
         void pump(chunk);
       });
       fileTranscoder.stream.on('end', () => {
-        ws.close();
+        void (async () => {
+          try {
+            await controller?.end();
+          } catch (err) {
+            handleFatal(err as Error);
+          }
+        })();
       });
     } catch (error) {
       handleFatal(error as Error);
@@ -224,20 +256,20 @@ export async function handleReplayConnection(
       fileTranscoder?.stop();
       await controller?.end();
       await controller?.close();
-            await persistLatency(
-              latencies,
-              {
-                sessionId,
-                provider,
-                lang,
-                startedAt,
-              },
-              latencyStore
-            ).catch(() => undefined);
-            await sessionStore.cleanup(sessionId);
-            recordLog({ type: 'session_end', endedAt: new Date().toISOString() });
-          })();
-        });
+      await persistLatency(
+        latencies,
+        {
+          sessionId,
+          provider,
+          lang,
+          startedAt,
+        },
+        latencyStore
+      ).catch(() => undefined);
+      await sessionStore.cleanup(sessionId);
+      recordLog({ type: 'session_end', endedAt: new Date().toISOString() });
+    })();
+  });
 
   ws.on('error', (error) => {
     handleFatal(error);

@@ -170,6 +170,27 @@ function normalizeWords(items: unknown[] | undefined): TranscriptWord[] | undefi
   return mapped.length > 0 ? mapped : undefined;
 }
 
+function wrapPcmBufferAsWav(buffer: Buffer, sampleRate: number, channels = 1, bitDepth = 16): Buffer {
+  const dataLength = buffer.length;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataLength, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM format
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  const byteRate = sampleRate * channels * (bitDepth / 8);
+  header.writeUInt32LE(byteRate, 28);
+  const blockAlign = channels * (bitDepth / 8);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitDepth, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataLength, 40);
+  return Buffer.concat([header, buffer]);
+}
+
 function shouldRetryElevenLabsStatus(status: number): boolean {
   return ELEVENLABS_BATCH_RETRYABLE_STATUS.has(status) || (status >= 500 && status < 600);
 }
@@ -383,8 +404,9 @@ export class ElevenLabsAdapter extends BaseAdapter {
     if (normalizedLanguage) {
       fields.language_code = normalizedLanguage;
     }
-    const fileContentType = `audio/l16; rate=${opts.sampleRateHz}; channels=1`;
-    const { body, contentType } = buildMultipartBody(fields, 'audio.pcm', buffer, fileContentType);
+    const wavBuffer = wrapPcmBufferAsWav(buffer, opts.sampleRateHz);
+    const fileContentType = 'audio/wav';
+    const { body, contentType } = buildMultipartBody(fields, 'audio.wav', wavBuffer, fileContentType);
     const json = await this.sendBatchWithRetry(body, contentType, apiKey);
     const words = normalizeWords(json.words);
     return {

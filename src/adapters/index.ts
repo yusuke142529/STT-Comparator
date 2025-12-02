@@ -4,6 +4,7 @@ import { DeepgramAdapter } from './deepgram.js';
 import { ElevenLabsAdapter } from './elevenlabs.js';
 import { LocalWhisperAdapter } from './localWhisper.js';
 import { WhisperStreamingAdapter } from './whisperStreaming.js';
+import { OpenAIAdapter } from './openai.js';
 
 const registry: Map<ProviderId, ProviderAdapter> = new Map();
 
@@ -15,6 +16,7 @@ function ensureAdapterInstances(): void {
     new ElevenLabsAdapter(),
     new LocalWhisperAdapter(),
     new WhisperStreamingAdapter(),
+    new OpenAIAdapter(),
   ];
   adapters.forEach((adapter) => registry.set(adapter.id, adapter));
 }

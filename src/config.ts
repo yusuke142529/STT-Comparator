@@ -11,12 +11,24 @@ const normalizationSchema = z.object({
   lowercase: z.boolean().optional(),
 });
 
+const ingressNormalizeSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    targetSampleRate: z.number().optional(),
+    targetChannels: z.number().optional(),
+    peakDbfs: z.number().optional(),
+    maxDurationSec: z.number().min(0.1).max(3600).optional(),
+  })
+  .partial()
+  .default({});
+
 const configSchema = z.object({
   audio: z.object({
     targetSampleRate: z.number().default(16000),
     targetChannels: z.number().default(1),
     chunkMs: z.number().default(250),
   }),
+  ingressNormalize: ingressNormalizeSchema.optional(),
   normalization: normalizationSchema,
   storage: z.object({
     driver: z.enum(['jsonl', 'sqlite']),

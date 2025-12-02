@@ -100,9 +100,22 @@ interface DeepgramBatchMetadata {
   processing_time?: number;
 }
 
+interface DeepgramUtterance {
+  transcript?: string;
+  words?: DeepgramWord[];
+}
+
+interface DeepgramBatchResult {
+  channels?: { alternatives?: DeepgramAlternative[] }[];
+  alternatives?: DeepgramAlternative[];
+  transcript?: string;
+  utterances?: DeepgramUtterance[];
+}
+
 interface DeepgramBatchResponse {
-  results?: { channels?: { alternatives?: DeepgramAlternative[] }[] }[];
+  results?: DeepgramBatchResult[] | DeepgramBatchResult;
   metadata?: DeepgramBatchMetadata;
+  utterances?: DeepgramUtterance[];
 }
 
 const mapDeepgramWord = (word: DeepgramWord): TranscriptWord => ({
@@ -204,6 +217,61 @@ function appendVadParameters(query: URLSearchParams, enableVad?: boolean) {
     query.set('endpointing', String(DEFAULT_ENDPOINTING_MS));
     query.set('vad_events', 'true');
   }
+}
+
+function normalizeTranscript(value?: string): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeDeepgramResults(
+  results?: DeepgramBatchResult[] | DeepgramBatchResult
+): DeepgramBatchResult[] {
+  if (!results) return [];
+  return Array.isArray(results) ? results : [results];
+}
+
+function flattenDeepgramAlternatives(result: DeepgramBatchResult): DeepgramAlternative[] {
+  const channelAlternatives =
+    result.channels?.flatMap((channel) => channel.alternatives ?? []) ?? [];
+  const directAlternatives = result.alternatives ?? [];
+  return [...channelAlternatives, ...directAlternatives];
+}
+
+function collectAlternativeTranscripts(result: DeepgramBatchResult): string[] {
+  return flattenDeepgramAlternatives(result)
+    .map((alt) => normalizeTranscript(alt.transcript))
+    .filter((value): value is string => Boolean(value));
+}
+
+function collectUtteranceTranscripts(utterances?: DeepgramUtterance[]): string[] {
+  return (utterances ?? [])
+    .map((utterance) => normalizeTranscript(utterance.transcript))
+    .filter((value): value is string => Boolean(value));
+}
+
+function extractDeepgramTranscripts(json: DeepgramBatchResponse): string[] {
+  const transcripts: string[] = [];
+  for (const result of normalizeDeepgramResults(json.results)) {
+    transcripts.push(...collectAlternativeTranscripts(result));
+    transcripts.push(...collectUtteranceTranscripts(result.utterances));
+    const raw = normalizeTranscript(result.transcript);
+    if (raw) {
+      transcripts.push(raw);
+    }
+  }
+  transcripts.push(...collectUtteranceTranscripts(json.utterances));
+  return transcripts;
+}
+
+function findFirstDeepgramAlternative(json: DeepgramBatchResponse): DeepgramAlternative | undefined {
+  for (const result of normalizeDeepgramResults(json.results)) {
+    const alternatives = flattenDeepgramAlternatives(result);
+    if (alternatives.length > 0) {
+      return alternatives[0];
+    }
+  }
+  return undefined;
 }
 
 export class DeepgramAdapter extends BaseAdapter {
@@ -406,14 +474,16 @@ export class DeepgramAdapter extends BaseAdapter {
   }
 
   private parseBatchResult(json: DeepgramBatchResponse): BatchResult {
-    const alt = json.results?.[0]?.channels?.[0]?.alternatives?.[0];
+    const alt = findFirstDeepgramAlternative(json);
     const durationSec = json.metadata?.duration ?? alt?.duration ?? 0;
+    const segments = extractDeepgramTranscripts(json);
+    const transcriptText = segments.join(' ').trim();
     const vendorMs =
       (json.metadata?.processing_ms ?? json.metadata?.processing_time) ?? 0;
     const vendorProcessingMs = Number.isFinite(vendorMs) ? Math.round(vendorMs) : 0;
     return {
       provider: this.id,
-      text: alt?.transcript ?? '',
+      text: transcriptText,
       words: alt?.words?.map(mapDeepgramWord),
       durationSec,
       vendorProcessingMs: Number.isFinite(vendorProcessingMs) ? vendorProcessingMs : undefined,

@@ -9,6 +9,7 @@ import { JobHistory } from './jobHistory.js';
 vi.mock('../config.js', () => ({
   loadConfig: vi.fn().mockResolvedValue({
     audio: { targetSampleRate: 16000, targetChannels: 1, chunkMs: 250 },
+    ingressNormalize: { enabled: true },
     normalization: {},
     storage: { driver: 'jsonl', path: './runs' },
     providers: ['mock'],
@@ -66,6 +67,19 @@ describe('BatchRunner', () => {
     const filePath = path.join(tmp, 'a.wav');
     await writeFile(filePath, Buffer.from('a'));
 
+    vi.doMock('../utils/audioIngress.js', () => ({
+      ensureNormalizedAudio: vi.fn(async (p: string) => ({
+        normalizedPath: p,
+        durationSec: 2,
+        bytes: 4,
+        degraded: false,
+        generated: false,
+        signature: 'sig',
+        release: async () => {},
+      })),
+      AudioValidationError: class extends Error {},
+    }));
+
     vi.doMock('../utils/ffmpeg.js', () => {
       const stream = new PassThrough();
       stream.end(Buffer.from([0, 1, 2, 3]));
@@ -104,6 +118,19 @@ describe('BatchRunner', () => {
     const tmp = await mkdtemp(path.join(tmpdir(), 'batch-test-'));
     const filePath = path.join(tmp, 'b.wav');
     await writeFile(filePath, Buffer.from('b'));
+
+    vi.doMock('../utils/audioIngress.js', () => ({
+      ensureNormalizedAudio: vi.fn(async (p: string) => ({
+        normalizedPath: p,
+        durationSec: 1,
+        bytes: 4,
+        degraded: false,
+        generated: false,
+        signature: 'sig',
+        release: async () => {},
+      })),
+      AudioValidationError: class extends Error {},
+    }));
 
     vi.doMock('../utils/ffmpeg.js', () => {
       const stream = new PassThrough();
@@ -148,6 +175,19 @@ describe('BatchRunner', () => {
     const filePathB = path.join(tmp, 'b.wav');
     await writeFile(filePathA, Buffer.from('a'));
     await writeFile(filePathB, Buffer.from('b'));
+
+    vi.doMock('../utils/audioIngress.js', () => ({
+      ensureNormalizedAudio: vi.fn(async (p: string) => ({
+        normalizedPath: p,
+        durationSec: 1,
+        bytes: 4,
+        degraded: false,
+        generated: false,
+        signature: 'sig',
+        release: async () => {},
+      })),
+      AudioValidationError: class extends Error {},
+    }));
 
     vi.doMock('../utils/ffmpeg.js', () => {
       const stream = new PassThrough();

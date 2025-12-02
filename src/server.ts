@@ -1,7 +1,9 @@
 import { createServer } from 'node:http';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, createReadStream } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -15,6 +17,7 @@ import { createRealtimeStorage, createRealtimeTranscriptStore, createStorage } f
 import { loadConfig, reloadConfig } from './config.js';
 import { loadEnvironment, reloadEnvironment } from './utils/env.js';
 import { BatchRunner } from './jobs/batchRunner.js';
+import { JobExportService } from './jobs/jobExportService.js';
 import { JobHistory } from './jobs/jobHistory.js';
 import { parseManifest } from './utils/manifest.js';
 import { toCsv } from './storage/csvExporter.js';
@@ -23,6 +26,9 @@ import { requireProviderAvailable } from './utils/providerStatus.js';
 import { ProviderAvailabilityCache } from './utils/providerAvailabilityCache.js';
 import { getAdapter } from './adapters/index.js';
 import { transcriptionOptionsSchema } from './validation.js';
+import { PreviewStore } from './replay/previewStore.js';
+import { AudioDecodeError } from './utils/audioNormalizer.js';
+import { ensureNormalizedAudio, AudioValidationError } from './utils/audioIngress.js';
 import type {
   ProviderId,
   RealtimeLatencySummary,
@@ -176,10 +182,12 @@ async function bootstrap() {
   const storage = createStorage(config.storage.driver, config.storage.path, retention);
   const realtimeLatencyStore = createRealtimeStorage(config.storage.driver, config.storage.path, retention);
   const realtimeTranscriptLogStore = createRealtimeTranscriptStore(config.storage.path, retention);
+  const previewStore = new PreviewStore();
   const replaySessionStore = new ReplaySessionStore();
   const jobHistory = new JobHistory(storage);
   await jobHistory.init();
-  const batchRunner = new BatchRunner(storage, jobHistory);
+  const jobExporter = new JobExportService(config.storage.path);
+  const batchRunner = new BatchRunner(storage, jobHistory, jobExporter);
   await batchRunner.init();
   await realtimeLatencyStore.init();
   await realtimeTranscriptLogStore.init();
@@ -198,16 +206,24 @@ async function bootstrap() {
     })
   );
   app.use(express.json({ limit: '2mb' }));
-  app.use(helmet());
+  app.use(
+    helmet({
+      // Allow preview audio (served from 4100) to be consumed by the Vite dev server (5173).
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    })
+  );
   app.use(
     helmet.contentSecurityPolicy({
       useDefaults: true,
       directives: {
-        defaultSrc: ["'self'"],
+        // Allow blob: for local audio previews (object URLs) while keeping other sources self-only.
+        defaultSrc: ["'self'", 'blob:'],
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", 'data:'],
         fontSrc: ["'self'", 'data:'],
+        // Allow object-URL audio previews and preview WAVs fetched from allowed origins.
+        mediaSrc: ["'self'", 'blob:', 'data:', ...allowedOrigins],
         connectSrc: ["'self'", ...allowedOrigins, ...allowedOrigins.map(toWsOrigin)],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -348,6 +364,84 @@ async function bootstrap() {
     }
   });
 
+  app.post('/api/realtime/preview', upload.single('file'), async (req, res, next) => {
+    let normalization: Awaited<ReturnType<typeof ensureNormalizedAudio>> | null = null;
+    try {
+      if (!req.file) {
+        throw new HttpError(400, 'audio file is required for preview');
+      }
+      if (!req.file.size || req.file.size === 0) {
+        throw new HttpError(400, 'audio file is empty');
+      }
+      const maxBytes = 120 * 1024 * 1024;
+      if (req.file.size > maxBytes) {
+        throw new HttpError(413, 'audio file too large for preview');
+      }
+
+      normalization = await ensureNormalizedAudio(req.file.path, {
+        config,
+        allowCache: false,
+        allowFallback: true,
+      });
+      const item = previewStore.create(normalization.normalizedPath);
+      res.json({
+        previewId: item.id,
+        previewUrl: `/api/realtime/preview/${item.id}`,
+        degraded: normalization.degraded,
+      });
+    } catch (error) {
+      if (error instanceof AudioValidationError || error instanceof AudioDecodeError) {
+        const code = error instanceof AudioValidationError ? error.code : 'AUDIO_UNSUPPORTED_FORMAT';
+        res.status(422).json({
+          code,
+          message: error.message,
+          detail: error instanceof AudioValidationError ? error.detail ?? error.message : error.message,
+        });
+        return;
+      }
+      if (error instanceof HttpError) {
+        res.status(error.statusCode).json(error.payload ?? { message: error.message });
+        return;
+      }
+      next(error as Error);
+    } finally {
+      if (req.file?.path) {
+        const shouldDeleteOriginal = !normalization || normalization.normalizedPath !== req.file.path;
+        if (shouldDeleteOriginal) {
+          await unlink(req.file.path).catch(() => undefined);
+        }
+      }
+    }
+  });
+
+  app.get('/api/realtime/preview/:id', async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      if (!id) {
+        res.status(400).json({ message: 'previewId is required' });
+        return;
+      }
+      const item = previewStore.take(id);
+      if (!item) {
+        res.status(404).json({ message: 'preview not found or expired' });
+        return;
+      }
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Cache-Control', 'no-store');
+      const stream = createReadStream(item.filePath);
+      stream.on('close', () => {
+        void unlink(item.filePath).catch(() => undefined);
+      });
+      stream.on('error', async (err) => {
+        await unlink(item.filePath).catch(() => undefined);
+        next(err);
+      });
+      stream.pipe(res);
+    } catch (error) {
+      next(error as Error);
+    }
+  });
+
   app.post('/api/realtime/replay', upload.single('file'), async (req, res, next) => {
     try {
       const providerAvailability = await providerStatusCache.get();
@@ -359,10 +453,38 @@ async function bootstrap() {
       if (!req.file) {
         throw new HttpError(400, 'audio file is required for replay');
       }
+      if (!req.file.size || req.file.size === 0) {
+        throw new HttpError(400, 'audio file is empty');
+      }
+      // Guard extremely long inputs that can hang realtime sockets
+      const maxBytes = 1024 * 1024 * 200; // ~200MB raw wav upper bound (~20+ minutes 16k mono)
+      if (req.file.size > maxBytes) {
+        throw new HttpError(413, 'audio file too large for realtime replay');
+      }
       requireProviderAvailable(providerAvailability, provider, 'streaming');
-      const session = replaySessionStore.create(req.file, provider, lang);
-      res.json({ sessionId: session.id, filename: session.originalName, createdAt: session.createdAt });
+      const normalization = await ensureNormalizedAudio(req.file.path, { config, allowCache: false, allowFallback: true });
+      const normalizedFile = {
+        ...req.file,
+        path: normalization.normalizedPath,
+        size: normalization.bytes,
+      };
+      const session = replaySessionStore.create(normalizedFile, provider, lang);
+      res.json({
+        sessionId: session.id,
+        filename: session.originalName,
+        createdAt: session.createdAt,
+        degraded: normalization.degraded,
+      });
     } catch (error) {
+      if (error instanceof AudioValidationError || error instanceof AudioDecodeError) {
+        const code = error instanceof AudioValidationError ? error.code : 'AUDIO_UNSUPPORTED_FORMAT';
+        res.status(422).json({
+          code,
+          message: error.message,
+          detail: error instanceof AudioValidationError ? error.detail ?? error.message : error.message,
+        });
+        return;
+      }
       if (error instanceof HttpError) {
         res.status(error.statusCode).json(error.payload ?? { message: error.message });
         return;

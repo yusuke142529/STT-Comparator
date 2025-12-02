@@ -42,12 +42,12 @@ interface ProviderFeatureFlags {
 const PROVIDER_FEATURE_OVERRIDES: Record<ProviderId, ProviderFeatureFlags> = {
   deepgram: { dictionary: true, punctuation: true, context: true },
   elevenlabs: { dictionary: false, punctuation: false, context: false },
+  openai: { dictionary: true, punctuation: true, context: true },
   local_whisper: {},
   mock: {},
   azure: {},
   aws: {},
   speechmatics: {},
-  openai: {},
   google: {},
   nvidia_riva: {},
   revai: {},
@@ -113,6 +113,21 @@ export async function computeProviderAvailability(
         supportsStreaming,
         supportsBatch,
         reason: 'ELEVENLABS_API_KEY is not set',
+        supportsDictionaryPhrases: features?.dictionary,
+        supportsPunctuationPolicy: features?.punctuation,
+        supportsContextPhrases: features?.context,
+      });
+      continue;
+    }
+    if (id === 'openai' && !process.env.OPENAI_API_KEY) {
+      const features = PROVIDER_FEATURE_OVERRIDES[id];
+      results.push({
+        id,
+        available: false,
+        implemented: true,
+        supportsStreaming,
+        supportsBatch,
+        reason: 'OPENAI_API_KEY is not set',
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,

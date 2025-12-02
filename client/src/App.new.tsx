@@ -32,7 +32,7 @@ export default function App() {
   const [lang, setLang] = useState('ja-JP');
   const [dictionary, setDictionary] = useState('');
   const [enableInterim, setEnableInterim] = useState(true);
-  const [enableVad, setEnableVad] = useState(false);
+  const [enableVad, setEnableVad] = useState(true);
   const [punctuationPolicy, setPunctuationPolicy] = useState<PunctuationPolicy>('full');
   const [parallel, setParallel] = useState(1);
   const [chunkMs, setChunkMs] = useState(250);
@@ -255,6 +255,8 @@ export default function App() {
           jobStatus={jobStatus}
           jobError={jobError}
           isBatchRunning={isBatchRunning}
+          jobResults={jobResults}
+          lastJobId={lastJobId}
         />
       )}
 

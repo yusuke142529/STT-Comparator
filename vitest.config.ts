@@ -5,6 +5,7 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: ['src/**/*.test.ts'],
+    setupFiles: ['src/test.setup.ts'],
     exclude: ['client/**', '**/node_modules/**', '**/.pnpm/**', '**/dist/**'],
     coverage: {
       provider: 'v8',

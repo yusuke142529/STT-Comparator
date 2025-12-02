@@ -16,10 +16,13 @@ import { loadConfig } from '../config.js';
 import { logger } from '../logger.js';
 import { getAdapter } from '../adapters/index.js';
 import { convertToPcmReadable } from '../utils/ffmpeg.js';
+import { ensureNormalizedAudio, AudioValidationError } from '../utils/audioIngress.js';
+import { AudioDecodeError } from '../utils/audioNormalizer.js';
 import { cer, rtf, wer } from '../scoring/metrics.js';
 import { matchManifestItem } from '../utils/manifest.js';
 import os from 'node:os';
 import type { JobHistory } from './jobHistory.js';
+import { JobExportService } from './jobExportService.js';
 
 interface FileInput {
   originalname: string;
@@ -48,7 +51,8 @@ export class BatchRunner {
 
   constructor(
     private storage: StorageDriver<BatchJobFileResult>,
-    private readonly jobHistory: JobHistory
+    private readonly jobHistory: JobHistory,
+    private readonly jobExporter?: JobExportService
   ) {}
 
   async init(): Promise<void> {
@@ -125,6 +129,14 @@ export class BatchRunner {
     const workers = Array.from({ length: concurrency }, () => worker());
     await Promise.all(workers);
 
+    if (this.jobExporter) {
+      try {
+        await this.jobExporter.export(job.id, job.results);
+      } catch {
+        // errors already logged by JobExportService
+      }
+    }
+
     // release heavy references and schedule eviction
     job.files = [];
     job.manifest = undefined;
@@ -145,6 +157,8 @@ export class BatchRunner {
     config: Awaited<ReturnType<typeof loadConfig>>
   ): Promise<void> {
     let sourceStream: Readable | null = null;
+    let normalizedPath: string | null = null;
+    let normalizationResult: Awaited<ReturnType<typeof ensureNormalizedAudio>> | null = null;
     try {
       const manifestItem = job.manifest ? matchManifestItem(job.manifest, file.originalname) : undefined;
       if (job.manifest && !manifestItem) {
@@ -153,7 +167,10 @@ export class BatchRunner {
         return;
       }
 
-      sourceStream = createReadStream(file.path);
+      normalizationResult = await ensureNormalizedAudio(file.path, { config, allowCache: true });
+      normalizedPath = normalizationResult.normalizedPath;
+
+      sourceStream = createReadStream(normalizedPath);
       await once(sourceStream, 'open');
       const { stream: pcmStream, durationPromise } = await convertToPcmReadable(sourceStream);
       const maxParallel = Math.min(os.cpus().length, config.jobs?.maxParallel ?? 4);
@@ -171,7 +188,7 @@ export class BatchRunner {
       const start = Date.now();
       const batchResult = await adapter.transcribeFileFromPCM(pcmStream, streamingOpts);
       const processingTimeMs = Date.now() - start; // server-measured wall clock
-      const durationSec = batchResult.durationSec ?? (await durationPromise);
+      const durationSec = batchResult.durationSec ?? normalizationResult.durationSec ?? (await durationPromise);
       if (!durationSec || !Number.isFinite(durationSec)) {
         job.failed += 1;
         job.errors.push({ file: file.originalname, message: 'duration could not be determined' });
@@ -203,12 +220,24 @@ export class BatchRunner {
       this.jobHistory.recordRow(score);
       job.done += 1;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown adapter error';
-      logger.error({ event: 'batch_failed', file: file.originalname, message });
+      const message =
+        error instanceof AudioValidationError || error instanceof AudioDecodeError
+          ? 'audio decode failed (unsupported or corrupted file)'
+          : error instanceof Error
+            ? error.message
+            : 'Unknown adapter error';
+      logger.error({
+        event: 'batch_failed',
+        file: file.originalname,
+        message,
+      });
       job.failed += 1;
       job.errors.push({ file: file.originalname, message });
     } finally {
       sourceStream?.destroy();
+      if (normalizationResult) {
+        void normalizationResult.release().catch(() => undefined);
+      }
       if (file.path) {
         void unlink(file.path).catch(() => undefined);
       }

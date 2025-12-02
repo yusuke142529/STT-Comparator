@@ -71,7 +71,10 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const [replayUploading, setReplayUploading] = useState(false);
   const [replayAudioUrl, setReplayAudioUrl] = useState<string | null>(null);
   const [isReplayAudioPlaying, setIsReplayAudioPlaying] = useState(false);
+  const [previewPlaybackWarning, setPreviewPlaybackWarning] = useState<string | null>(null);
   const [previewPlaybackError, setPreviewPlaybackError] = useState<string | null>(null);
+  const [previewTranscoding, setPreviewTranscoding] = useState(false);
+  const [previewSourceKind, setPreviewSourceKind] = useState<'local' | 'server' | null>(null);
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState<string | null>(null);
   const [isReplayAudioMuted, setIsReplayAudioMuted] = useState(false);
   const [outputSinkError, setOutputSinkError] = useState<string | null>(null);
@@ -90,6 +93,61 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const handleReplayAudioPlayChange = useCallback((playing: boolean) => {
     setIsReplayAudioPlaying(playing);
   }, []);
+
+  const requestServerPreview = useCallback(async () => {
+    if (!replayFile) {
+      setPreviewPlaybackError('プレビューする音声ファイルがありません');
+      return;
+    }
+    setPreviewTranscoding(true);
+    setPreviewPlaybackWarning(null);
+    setPreviewPlaybackError(null);
+    try {
+      const form = new FormData();
+      form.append('file', replayFile, replayFile.name);
+      const response = await fetch(`${apiBase}/api/realtime/preview`, { method: 'POST', body: form });
+      if (!response.ok) {
+        const text = await response.text();
+        try {
+          const parsed = JSON.parse(text) as { message?: string; detail?: string; code?: string };
+          const detail = parsed.detail ?? parsed.message;
+          throw new Error(detail ?? 'プレビュー用の変換に失敗しました');
+        } catch {
+          throw new Error('プレビュー用の変換に失敗しました');
+        }
+      }
+      const data = (await response.json()) as { previewUrl: string; degraded?: boolean };
+      const absoluteUrl = data.previewUrl.startsWith('http')
+        ? data.previewUrl
+        : `${apiBase}${data.previewUrl.startsWith('/') ? '' : '/'}${data.previewUrl}`;
+      replayAudioUrlRef.current = null;
+      setReplayAudioUrl(absoluteUrl);
+      setPreviewSourceKind('server');
+      setPreviewPlaybackWarning(
+        data.degraded
+          ? '音声ファイルに一部破損がありましたが再生用に変換しました（精度に影響する可能性があります）'
+          : null
+      );
+    } catch (error) {
+      setPreviewSourceKind('local');
+      setPreviewPlaybackWarning(null);
+      setPreviewPlaybackError((error as Error)?.message ?? 'プレビュー用の変換に失敗しました');
+    } finally {
+      setPreviewTranscoding(false);
+    }
+  }, [apiBase, replayFile]);
+
+  const handleReplayAudioError = useCallback(() => {
+    if (!replayFile) {
+      setPreviewPlaybackError('音声ファイルが選択されていません');
+      return;
+    }
+    if (previewSourceKind === 'server' || previewTranscoding) {
+      setPreviewPlaybackError('ブラウザが音声を再生できませんでした。ファイル形式を確認してください。');
+      return;
+    }
+    void requestServerPreview();
+  }, [previewSourceKind, previewTranscoding, replayFile, requestServerPreview]);
 
   const {
     devices: audioOutputDevices,
@@ -243,6 +301,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     if (!audio) return undefined;
     audio.currentTime = 0;
     void audio.play().catch((error) => {
+      if ((error as DOMException)?.name === 'AbortError') return; // play が直後の pause で中断された場合は無視
       console.warn('内部再生音声の自動再生に失敗しました', error);
     });
     return () => {
@@ -302,6 +361,9 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     setIsReplayAudioPlaying(false);
     setOutputSinkError(null);
     setPreviewPlaybackError(null);
+    setPreviewPlaybackWarning(null);
+    setPreviewTranscoding(false);
+    setPreviewSourceKind(file ? 'local' : null);
     if (file) {
       const url = URL.createObjectURL(file);
       replayAudioUrlRef.current = url;
@@ -332,10 +394,15 @@ const useRealtimeController = (props: RealtimeViewProps) => {
         streamSession.setError('再生ファイルを選択してください');
         return;
       }
+      if (previewPlaybackError) {
+        streamSession.setError(previewPlaybackError);
+        return;
+      }
       setPreviewPlaybackError(null);
       const previewAudio = replayAudioRef.current;
       if (previewAudio) {
         void previewAudio.play().catch((error) => {
+          if ((error as DOMException)?.name === 'AbortError') return; // play→pause の競合は警告しない
           console.warn('プレビュー音声の再生に失敗しました', error);
           setPreviewPlaybackError('ブラウザが自動再生を拒否しました。プレビューの再生ボタンを押してからもう一度実行してください。');
         });
@@ -416,8 +483,11 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     replayAudioRef,
     replayAudioPlaying: isReplayAudioPlaying,
     onReplayAudioPlayChange: handleReplayAudioPlayChange,
+    onReplayAudioError: handleReplayAudioError,
     previewPlaybackError,
+    previewPlaybackWarning,
     setPreviewPlaybackError,
+    previewTranscoding,
     dictionary,
     setDictionary,
     audioOutputDevices,

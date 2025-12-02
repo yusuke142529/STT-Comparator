@@ -17,16 +17,19 @@ const baseResult = (overrides: Partial<BatchJobFileResult> = {}): BatchJobFileRe
 
 const memoryStorage = (
   records: BatchJobFileResult[],
-  prunedJobs: Record<string, BatchJobFileResult[]> = {}
+  afterPrune?: BatchJobFileResult[]
 ) => {
-  const readAll = vi.fn().mockResolvedValue(records);
-  const readByJob = vi
-    .fn()
-    .mockImplementation((jobId: string) =>
-      Promise.resolve(
-        prunedJobs[jobId] ?? records.filter((row) => row.jobId === jobId)
-      )
-    );
+  let calls = 0;
+  const readAll = vi.fn().mockImplementation(() => {
+    calls += 1;
+    if (afterPrune && calls > 1) {
+      return Promise.resolve(afterPrune);
+    }
+    return Promise.resolve(records);
+  });
+  const readByJob = vi.fn().mockImplementation((jobId: string) =>
+    Promise.resolve(records.filter((row) => row.jobId === jobId))
+  );
 
   return {
     append: vi.fn().mockResolvedValue(undefined),
@@ -61,7 +64,7 @@ describe('JobHistory', () => {
         baseResult({ jobId: 'job-a', createdAt: '2025-11-25T01:00:00.000Z' }),
         baseResult({ jobId: 'job-b', createdAt: '2025-11-25T02:00:00.000Z' }),
       ],
-      { 'job-b': [] }
+      [baseResult({ jobId: 'job-a', createdAt: '2025-11-25T01:00:00.000Z' })]
     );
 
     const history = new JobHistory(driver);

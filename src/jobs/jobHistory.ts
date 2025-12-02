@@ -77,34 +77,44 @@ export class JobHistory {
     }, null);
   }
 
+  private mapByJob(rows: BatchJobFileResult[]): Map<string, BatchJobFileResult[]> {
+    const result = new Map<string, BatchJobFileResult[]>();
+    for (const row of rows) {
+      if (!row.jobId) continue;
+      const bucket = result.get(row.jobId);
+      if (bucket) {
+        bucket.push(row);
+      } else {
+        result.set(row.jobId, [row]);
+      }
+    }
+    return result;
+  }
+
+  private rebuildFrom(rows: BatchJobFileResult[]): void {
+    this.rowsByJob.clear();
+    for (const [jobId, records] of this.mapByJob(rows)) {
+      this.rowsByJob.set(jobId, records);
+    }
+  }
+
   private async rebuild(): Promise<void> {
     const all = await this.storage.readAll();
-    this.rowsByJob.clear();
-    all.forEach((row) => this.recordRow(row));
+    this.rebuildFrom(all);
   }
 
   private async syncWithStorage(): Promise<void> {
-    const reader = this.storage.readByJob;
-    if (typeof reader !== 'function') {
-      return;
-    }
+    const currentRows = await this.storage.readAll();
+    const grouped = this.mapByJob(currentRows);
 
-    const boundReader = reader.bind(this.storage);
-
-    const jobIds = [...this.rowsByJob.keys()];
-    const synced = await Promise.all(
-      jobIds.map(async (jobId) => ({
-        jobId,
-        rows: await boundReader(jobId),
-      }))
-    );
-
-    for (const { jobId, rows } of synced) {
-      if (rows.length === 0) {
+    // align in-memory map with storage contents in linear time
+    for (const jobId of [...this.rowsByJob.keys()]) {
+      if (!grouped.has(jobId)) {
         this.rowsByJob.delete(jobId);
-      } else {
-        this.rowsByJob.set(jobId, rows);
       }
+    }
+    for (const [jobId, records] of grouped) {
+      this.rowsByJob.set(jobId, records);
     }
   }
 }

@@ -4,6 +4,12 @@
     "targetChannels": 1,
     "chunkMs": 250
   },
+  "ingressNormalize": {
+    "enabled": true,
+    "targetSampleRate": 16000,
+    "targetChannels": 1,
+    "peakDbfs": -1
+  },
   "normalization": {
     "nfkc": true,
     "stripPunct": true,
@@ -16,7 +22,7 @@
     "retentionDays": 30,
     "maxRows": 100000
   },
-  "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"],
+  "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming", "openai"],
   "providerHealth": {
     "refreshMs": 5000
   }
