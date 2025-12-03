@@ -12,6 +12,7 @@ const manifestSchema = z.object({
       meta: z.record(z.unknown()).optional(),
     })
   ),
+  allowBasenameFallback: z.boolean().optional(),
   normalization: z
     .object({
       nfkc: z.boolean().optional(),
@@ -21,6 +22,15 @@ const manifestSchema = z.object({
   })
   .optional(),
 });
+
+export class ManifestMatchError extends Error {
+  code: 'MANIFEST_AMBIGUOUS';
+
+  constructor(message: string) {
+    super(message);
+    this.code = 'MANIFEST_AMBIGUOUS';
+  }
+}
 
 function normalizeAudioPath(value: string): string {
   const raw = value.replace(/\\/g, '/');
@@ -44,8 +54,20 @@ export function matchManifestItem(manifest: EvaluationManifest, filename: string
     return exactMatch;
   }
 
-  return manifest.items.find((item) => {
+  if (manifest.allowBasenameFallback !== true) {
+    return undefined;
+  }
+
+  const basenameMatches = manifest.items.filter((item) => {
     const itemBase = path.posix.basename(normalizeAudioPath(item.audio) || item.audio);
     return itemBase === filenameBase;
   });
+
+  if (basenameMatches.length > 1) {
+    throw new ManifestMatchError(
+      `ambiguous manifest match for "${filenameBase}" (${basenameMatches.length} candidates)`
+    );
+  }
+
+  return basenameMatches[0];
 }

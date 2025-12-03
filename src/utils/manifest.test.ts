@@ -24,7 +24,7 @@ describe('matchManifestItem', () => {
   });
 
   it('falls back to basename when normalized paths are identical but no directory info provided', () => {
-    const item = matchManifestItem(manifest, 'simple.wav');
+    const item = matchManifestItem({ ...manifest, allowBasenameFallback: true }, 'simple.wav');
     expect(item?.ref).toBe('simple');
   });
 

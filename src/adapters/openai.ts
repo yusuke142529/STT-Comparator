@@ -56,41 +56,59 @@ const toTranscriptWords = (value: unknown): TranscriptWord[] | undefined => {
     .filter((x): x is TranscriptWord => Boolean(x));
 };
 
-class Pcm16kTo24kResampler {
+class SampleRate24kResampler {
   private carrySample: number | null = null;
+  private phase: number;
+  private readonly step: number;
+  private readonly ratio: number;
+  private readonly sourceRate: number;
+
+  constructor(sourceSampleRate: number) {
+    this.sourceRate = sourceSampleRate;
+    this.ratio = RESAMPLED_SAMPLE_RATE / sourceSampleRate;
+    this.step = sourceSampleRate / RESAMPLED_SAMPLE_RATE;
+    this.phase = 0;
+  }
 
   resample(chunk: Buffer): Buffer {
     if (chunk.length === 0) return Buffer.alloc(0);
+    if (
+      this.sourceRate === RESAMPLED_SAMPLE_RATE ||
+      !Number.isFinite(this.sourceRate) ||
+      this.sourceRate <= 0
+    ) {
+      return chunk;
+    }
+
     const input = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
-    const estimated = Math.ceil((input.length + (this.carrySample ? 1 : 0)) * 1.5) + 4;
+    const paddedLength = input.length + (this.carrySample === null ? 0 : 1);
+    const working = new Int16Array(paddedLength);
+    let offset = 0;
+    if (this.carrySample !== null) {
+      working[0] = this.carrySample;
+      offset = 1;
+    }
+    working.set(input, offset);
+
+    const estimated = Math.ceil((working.length - this.phase) * this.ratio) + 4;
     const output = new Int16Array(estimated);
     let outIdx = 0;
+    const lastValidIndex = working.length - 1;
 
-    let prev: number | null = this.carrySample;
-    let startIndex = 0;
-    if (prev !== null && input.length > 0) {
-      const s0 = prev;
-      const s1 = input[0];
-      output[outIdx++] = s0;
-      output[outIdx++] = Math.round((2 * s0 + s1) / 3);
-      output[outIdx++] = Math.round((s0 + 2 * s1) / 3);
-      startIndex = 1;
+    let pos = this.phase;
+    while (pos < lastValidIndex) {
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, lastValidIndex);
+      const frac = pos - i0;
+      const s0 = working[i0];
+      const s1 = working[i1];
+      const sample = s0 + frac * (s1 - s0);
+      output[outIdx++] = Math.round(sample);
+      pos += this.step;
     }
 
-    for (let i = startIndex; i < input.length - 1; i++) {
-      const s0 = input[i];
-      const s1 = input[i + 1];
-      output[outIdx++] = s0;
-      output[outIdx++] = Math.round((2 * s0 + s1) / 3);
-      output[outIdx++] = Math.round((s0 + 2 * s1) / 3);
-    }
-
-    // ensure the last original sample is preserved
-    if (input.length > 0) {
-      const last = input[input.length - 1];
-      output[outIdx++] = last;
-      this.carrySample = last;
-    }
+    this.phase = pos - lastValidIndex;
+    this.carrySample = working[lastValidIndex];
 
     return Buffer.from(output.buffer.slice(0, outIdx * 2));
   }
@@ -162,6 +180,7 @@ export class OpenAIAdapter extends BaseAdapter {
     const apiKey = requireApiKey();
     const model = DEFAULT_STREAMING_MODEL;
     const language = normalizeIsoLanguageCode(opts.language);
+    const sourceSampleRate = opts.sampleRateHz ?? 16_000;
     // OpenAI Realtime transcription benefits from periodic commits even when server VAD is enabled.
     // Always enable manual commits so buffered audio is flushed at least once per interval.
     const manualCommit = true;
@@ -183,11 +202,16 @@ export class OpenAIAdapter extends BaseAdapter {
       close: Array<() => void>;
     } = { data: [], error: [], close: [] };
 
-    const resampler = new Pcm16kTo24kResampler();
+    const resampler = new SampleRate24kResampler(sourceSampleRate);
     let openResolved = false;
     let pingTimer: NodeJS.Timeout | null = null;
     let manualCommitTimer: NodeJS.Timeout | null = null;
     let bufferedBytes = 0;
+    const resetBufferedState = () => {
+      hasAudio = false;
+      bufferedBytes = 0;
+      clearManualCommitTimer();
+    };
     const minBufferedMs = 100;
     const minBufferedBytes = Math.ceil((RESAMPLED_SAMPLE_RATE * 2 * minBufferedMs) / 1000); // mono 16-bit
 
@@ -248,9 +272,9 @@ export class OpenAIAdapter extends BaseAdapter {
 
     let hasAudio = false;
 
-    const commitBuffer = async () => {
+    const commitBuffer = async (force = false) => {
       if (!hasAudio) return; // avoid OpenAI "buffer too small" when nothing was sent
-      if (bufferedBytes < minBufferedBytes) return; // wait until we have at least 100ms buffered
+      if (!force && bufferedBytes < minBufferedBytes) return; // wait until we have at least 100ms buffered
       await wsReady;
       ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
       bufferedBytes = 0;
@@ -274,9 +298,21 @@ export class OpenAIAdapter extends BaseAdapter {
         const transcript = toPartialTranscript(payload);
         if (transcript) {
           listeners.data.forEach((cb) => cb(transcript));
+          if (transcript.isFinal) {
+            // Server VAD already flushed its internal buffer; avoid redundant commits that
+            // trigger "buffer too small" errors by clearing local counters.
+            resetBufferedState();
+          }
         } else if (payload?.type === 'error' && typeof payload?.error === 'object') {
           const err = payload.error as { message?: string };
-          listeners.error.forEach((cb) => cb(new Error(err.message ?? 'openai realtime error')));
+          const message = err.message ?? 'openai realtime error';
+          if (message.toLowerCase().includes('buffer too small')) {
+            // Ignore benign commit errors that can occur when server VAD auto-committed
+            // the buffer; just reset local counters and continue.
+            resetBufferedState();
+            return;
+          }
+          listeners.error.forEach((cb) => cb(new Error(message)));
         }
       } catch (err) {
         listeners.error.forEach((cb) => cb(err as Error));
@@ -325,13 +361,13 @@ export class OpenAIAdapter extends BaseAdapter {
       },
       async end() {
         clearManualCommitTimer();
-        await commitBuffer();
+        await commitBuffer(true);
       },
       async close() {
         clearManualCommitTimer();
         // If no audio was ever sent, just close without commit to avoid buffer errors.
         if (hasAudio) {
-          await commitBuffer().catch(() => {
+          await commitBuffer(true).catch(() => {
             // ignore commit errors during shutdown
           });
         }

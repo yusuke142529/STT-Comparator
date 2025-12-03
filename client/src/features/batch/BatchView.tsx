@@ -207,6 +207,7 @@ export const BatchView = ({
                     <div className="transcript-entry__meta">
                       <span className="transcript-entry__path">{entry.path}</span>
                       <span className="msg-provider">{entry.provider}</span>
+                      {entry.degraded && <span className="bubble-badge degraded" aria-label="degraded decode">degraded</span>}
                     </div>
                     <div className="transcript-entry__metrics">
                       {entry.cer != null && <span>CER: {fmt(entry.cer)}</span>}

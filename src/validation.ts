@@ -15,6 +15,8 @@ export const streamingConfigMessageSchema = z
     enableInterim: z.boolean().optional(),
     contextPhrases: z.array(z.string()).max(100).optional(),
     normalizePreset: z.string().max(100).optional(),
+    pcm: z.boolean().optional(),
+    degraded: z.boolean().optional(),
     options: transcriptionOptionsSchema.optional(),
   })
   .strict();

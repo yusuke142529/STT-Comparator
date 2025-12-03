@@ -11,10 +11,24 @@ interface UseStreamSessionConfig {
   onSessionClose?: () => void;
 }
 
-const getSupportedMimeType = (): string => {
-  if (typeof MediaRecorder === 'undefined') return '';
-  const types = ['audio/webm; codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg; codecs=opus', 'audio/wav'];
-  return types.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+const TARGET_SAMPLE_RATE = 16000;
+const HEADER_BYTES = 16; // seq(uint32) + captureTs(float64) + durationMs(float32)
+
+const buildAudioConstraints = (deviceId?: string): MediaTrackConstraints | boolean => {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getSupportedConstraints) {
+    return deviceId ? { deviceId: { exact: deviceId } } : true;
+  }
+  const supported = navigator.mediaDevices.getSupportedConstraints();
+  const constraints: MediaTrackConstraints = {};
+  if (deviceId) constraints.deviceId = { exact: deviceId };
+  if (supported.channelCount) constraints.channelCount = 1;
+  if (supported.sampleRate) constraints.sampleRate = 16000;
+  if (supported.sampleSize) constraints.sampleSize = 16;
+  if (supported.echoCancellation) constraints.echoCancellation = false;
+  if (supported.noiseSuppression) constraints.noiseSuppression = false;
+  if (supported.autoGainControl) constraints.autoGainControl = false;
+  if (supported.latency) constraints.latency = 0.01;
+  return Object.keys(constraints).length > 0 ? constraints : deviceId ? { deviceId: { exact: deviceId } } : true;
 };
 
 export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, buildWsUrl, retry, onSessionClose }: UseStreamSessionConfig) => {
@@ -23,9 +37,17 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const transcriptIdRef = useRef(0);
+  const interimByChannelRef = useRef<Record<string, string | null>>({});
+  const lastFinalByChannelRef = useRef<Record<string, string | null>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const streamingRef = useRef(false);
 
   const resetStreamState = useCallback(() => {
@@ -33,11 +55,28 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
     setLatencies([]);
     setSessionId(null);
     setError(null);
+    setWarning(null);
+    interimByChannelRef.current = {};
+    lastFinalByChannelRef.current = {};
+  }, []);
+
+  const stopMedia = useCallback(() => {
+    workletNodeRef.current?.disconnect();
+    workletNodeRef.current = null;
+    sourceNodeRef.current?.disconnect();
+    sourceNodeRef.current = null;
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
   }, []);
 
   useEffect(() => () => {
-    recorderRef.current?.stream.getTracks().forEach((track) => track.stop());
-    recorderRef.current?.stop();
+    workletNodeRef.current?.disconnect();
+    sourceNodeRef.current?.disconnect();
+    audioContextRef.current?.close().catch(() => undefined);
     wsRef.current?.close();
     streamingRef.current = false;
   }, []);
@@ -51,17 +90,100 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
             setSessionId(payload.sessionId);
             retry.reset();
           } else if (payload.type === 'transcript' && payload.text && typeof payload.timestamp === 'number') {
-            setTranscripts((prev) => [
-              ...prev.slice(-99),
-              {
+            const channel = (payload as { channel?: string }).channel ?? 'mic';
+            const isFinal = !!payload.isFinal;
+            const provider = payload.provider || '';
+            const mergeWindowMs = Math.max(chunkMs * 2, 800);
+
+            setTranscripts((prev) => {
+              const next = [...prev];
+              const currentInterimId = interimByChannelRef.current[channel];
+              const lastFinalId = lastFinalByChannelRef.current[channel];
+
+              const applyUpdate = (targetId: string) => {
+                const idx = next.findIndex((row) => row.id === targetId);
+                if (idx !== -1) {
+                  next[idx] = {
+                    ...next[idx],
+                    text: payload.text!,
+                    provider,
+                    channel,
+                    isFinal,
+                    timestamp: payload.timestamp!,
+                    latencyMs: payload.latencyMs,
+                    degraded: payload.degraded,
+                  };
+                  return true;
+                }
+                return false;
+              };
+
+              if (isFinal) {
+                if (currentInterimId && applyUpdate(currentInterimId)) {
+                  interimByChannelRef.current[channel] = null;
+                  lastFinalByChannelRef.current[channel] = currentInterimId;
+                  return next;
+                }
+
+                if (lastFinalId) {
+                  const idx = next.findIndex((row) => row.id === lastFinalId);
+                  if (idx !== -1) {
+                    const row = next[idx];
+                    const withinWindow = payload.timestamp! - row.timestamp <= mergeWindowMs;
+                    const sameProvider = row.provider === provider;
+                    if (withinWindow && sameProvider) {
+                      const separator = row.text.trim().length === 0 || row.text.endsWith(' ') ? '' : ' ';
+                      next[idx] = {
+                        ...row,
+                        text: `${row.text}${separator}${payload.text!}`,
+                  timestamp: payload.timestamp!,
+                  latencyMs: payload.latencyMs ?? row.latencyMs,
+                  degraded: payload.degraded ?? row.degraded,
+                };
+                return next.slice(-100);
+              }
+            }
+                }
+
+                transcriptIdRef.current += 1;
+                const id = `${payload.timestamp}-F-${transcriptIdRef.current}`;
+                next.push({
+                  id,
+                  text: payload.text!,
+                  provider,
+                  channel,
+                  isFinal: true,
+                  timestamp: payload.timestamp!,
+                  latencyMs: payload.latencyMs,
+                  degraded: payload.degraded,
+                });
+                interimByChannelRef.current[channel] = null;
+                lastFinalByChannelRef.current[channel] = id;
+                return next.slice(-100);
+              }
+
+              // Interim transcript: replace existing for the channel or append new
+              if (currentInterimId && applyUpdate(currentInterimId)) {
+                return next;
+              }
+
+              transcriptIdRef.current += 1;
+              const id = `${payload.timestamp}-I-${transcriptIdRef.current}`;
+              next.push({
+                id,
                 text: payload.text!,
-                provider: payload.provider || '',
-                isFinal: !!payload.isFinal,
+                provider,
+                channel,
+                isFinal: false,
                 timestamp: payload.timestamp!,
                 latencyMs: payload.latencyMs,
-              },
-            ]);
-            if (typeof payload.latencyMs === 'number') {
+                degraded: payload.degraded,
+              });
+              interimByChannelRef.current[channel] = id;
+              return next.slice(-100);
+            });
+
+            if (isFinal && typeof payload.latencyMs === 'number') {
               setLatencies((prev) => [payload.latencyMs!, ...prev].slice(0, 500));
             }
           } else if (payload.type === 'error' && payload.message) {
@@ -75,6 +197,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
 
       const handleError = () => {
         setError('ストリーム接続でエラーが発生しました');
+        stopMedia();
         streamingRef.current = false;
         setIsStreaming(false);
         retry.schedule(restart);
@@ -86,6 +209,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           setError('ストリームが切断されました');
           retry.schedule(restart);
         }
+        stopMedia();
         streamingRef.current = false;
         setIsStreaming(false);
         setSessionId(null);
@@ -102,59 +226,111 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
         socket.removeEventListener('close', handleClose);
       };
     },
-    [onSessionClose, retry]
+    [chunkMs, onSessionClose, retry]
   );
 
   const startMic = useCallback(
-    async (deviceId?: string) => {
-      const mimeType = getSupportedMimeType();
-      if (!mimeType) {
-        setError('このブラウザはサポートされている音声形式が検出できません');
-        return;
-      }
-
+    async (deviceId?: string, options?: { allowDegraded?: boolean }) => {
+      const allowDegraded = options?.allowDegraded ?? false;
+      let degraded = false;
       resetStreamState();
       retry.reset();
       setIsStreaming(true);
       setError(null);
+      setWarning(null);
 
       try {
-        const audioConstraints: MediaTrackConstraints = {};
-        if (deviceId) {
-          audioConstraints.deviceId = { exact: deviceId };
+        const audioConstraints = buildAudioConstraints(deviceId);
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        streamRef.current = stream;
+
+        const settings = stream.getAudioTracks()[0]?.getSettings() ?? {};
+        const badSampleRate = typeof settings.sampleRate === 'number' && settings.sampleRate !== TARGET_SAMPLE_RATE;
+        const badChannels = typeof settings.channelCount === 'number' && settings.channelCount !== 1;
+        const dspOn =
+          settings.echoCancellation === true || settings.noiseSuppression === true || settings.autoGainControl === true;
+        if (badSampleRate || badChannels || dspOn) {
+          stream.getTracks().forEach((t) => t.stop());
+          if (!allowDegraded) {
+            setError(
+              'マイク設定が仕様と一致しません (16kHz/mono/エフェクトOFF)。ブラウザやOSのマイク設定を確認してください。'
+            );
+            setIsStreaming(false);
+            return;
+          }
+          degraded = true;
+          setWarning('品質低下モードで継続します: 16kHz/mono/エフェクトOFF を満たせませんでした。');
+          const retryStream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true });
+          streamRef.current = retryStream;
         }
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? audioConstraints : true });
-        const mediaRecorder = new MediaRecorder(stream, {
-          mimeType,
-          audioBitsPerSecond: 64000,
+
+        const activeStream = streamRef.current ?? stream;
+        const ctxSampleRate = TARGET_SAMPLE_RATE;
+        const context = new AudioContext({ sampleRate: ctxSampleRate, latencyHint: 'interactive' });
+        audioContextRef.current = context;
+        if (context.sampleRate !== TARGET_SAMPLE_RATE) {
+          activeStream.getTracks().forEach((t) => t.stop());
+          await context.close();
+          audioContextRef.current = null;
+          if (!allowDegraded) {
+            setError('AudioContext が 16kHz をサポートしていません (ハードウェア/ブラウザ制限)');
+            setIsStreaming(false);
+            return;
+          }
+          degraded = true;
+          setWarning('品質低下モード: AudioContext が 16kHz ではありません。ブラウザ/デバイスを確認してください。');
+        }
+
+        const workletUrl = new URL('../audio/pcmWorklet.js', import.meta.url);
+        await context.audioWorklet.addModule(workletUrl);
+
+        const source = context.createMediaStreamSource(activeStream);
+        sourceNodeRef.current = source;
+        const chunkSamples = Math.round((TARGET_SAMPLE_RATE * chunkMs) / 1000);
+        const worklet = new AudioWorkletNode(context, 'pcm-worklet', {
+          numberOfOutputs: 0,
+          processorOptions: {
+            chunkSamples,
+          },
         });
+        workletNodeRef.current = worklet;
+
+        const timeBaseMs = Date.now() - context.currentTime * 1000;
+
+        const sendPcmChunk = (payload: { seq: number; pcm: ArrayBuffer; durationMs: number; endTimeMs: number }) => {
+          const socket = wsRef.current;
+          if (!socket || socket.readyState !== WebSocket.OPEN) return;
+          const captureTs = timeBaseMs + payload.endTimeMs;
+          const packet = new ArrayBuffer(HEADER_BYTES + payload.pcm.byteLength);
+          const view = new DataView(packet);
+          view.setUint32(0, payload.seq, true);
+          view.setFloat64(4, captureTs, true);
+          view.setFloat32(12, payload.durationMs, true);
+          new Uint8Array(packet, HEADER_BYTES).set(new Uint8Array(payload.pcm));
+          socket.send(packet);
+        };
+
+        worklet.port.onmessage = (event: MessageEvent) => {
+          const data = event.data as { seq: number; pcm: ArrayBuffer; durationMs: number; endTimeMs: number };
+          sendPcmChunk(data);
+        };
 
         const socket = new WebSocket(buildWsUrl('stream'));
         wsRef.current = socket;
-        recorderRef.current = mediaRecorder;
 
         const cleanup = () => {
-          if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-            recorderRef.current.stop();
-          }
-          stream.getTracks().forEach((track) => track.stop());
+          stopMedia();
           wsRef.current = null;
         };
 
-        attachRealtimeSocketHandlers(socket, () => startMic(deviceId), cleanup);
+        attachRealtimeSocketHandlers(socket, () => startMic(deviceId, { allowDegraded }), cleanup);
 
         socket.addEventListener('open', () => {
           if (wsRef.current !== socket) return;
-          socket.send(JSON.stringify(buildStreamingConfig()));
-          if (mediaRecorder.state === 'inactive') {
-            mediaRecorder.start(chunkMs);
-          }
-        });
-
-        mediaRecorder.addEventListener('dataavailable', (event) => {
-          if (event.data.size > 0 && wsRef.current === socket && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(event.data);
-          }
+          socket.send(JSON.stringify({ ...buildStreamingConfig(), pcm: true, degraded }));
+          source.connect(worklet);
+          // keep graph silent: no destination connection
+          void context.resume();
         });
 
         streamingRef.current = true;
@@ -232,24 +408,23 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
     streamingRef.current = false;
     setIsStreaming(false);
     wsRef.current?.close();
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
-      recorderRef.current.stream.getTracks().forEach((track) => track.stop());
-    }
+    stopMedia();
     setSessionId(null);
     retry.reset();
-  }, [retry]);
+  }, [retry, stopMedia]);
 
   return {
     transcripts,
     latencies,
     isStreaming,
     error,
+    warning,
     sessionId,
     startMic,
     startReplay,
     stop,
     setError,
+    setWarning,
     resetStreamState,
   };
 };

@@ -44,6 +44,7 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
           wer REAL,
           latencyMs INTEGER,
           vendorProcessingMs INTEGER,
+          degraded INTEGER,
           text TEXT,
           refText TEXT,
           opts TEXT,
@@ -62,6 +63,10 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
     if (!hasVendorProcessing) {
       this.db.prepare(`ALTER TABLE results ADD COLUMN vendorProcessingMs INTEGER`).run();
     }
+    const hasDegraded = jobColumns.some((row) => row.name === 'degraded');
+    if (!hasDegraded) {
+      this.db.prepare(`ALTER TABLE results ADD COLUMN degraded INTEGER`).run();
+    }
 
     const createdAtColumns = this.db.prepare(`PRAGMA table_info('results')`).all() as Database.ColumnDefinition[];
     const hasCreatedAt = createdAtColumns.some((row) => row.name === 'createdAt');
@@ -75,8 +80,8 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
     if (!this.db) throw new Error('SQLite store not initialized');
     this.db
       .prepare(
-        `INSERT INTO results (jobId, path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, vendorProcessingMs, text, refText, opts, createdAt)
-         VALUES (@jobId, @path, @provider, @lang, @durationSec, @processingTimeMs, @rtf, @cer, @wer, @latencyMs, @vendorProcessingMs, @text, @refText, @opts, @createdAt)`
+        `INSERT INTO results (jobId, path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, vendorProcessingMs, degraded, text, refText, opts, createdAt)
+         VALUES (@jobId, @path, @provider, @lang, @durationSec, @processingTimeMs, @rtf, @cer, @wer, @latencyMs, @vendorProcessingMs, @degraded, @text, @refText, @opts, @createdAt)`
       )
       .run({
         ...record,
@@ -92,6 +97,7 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
     const rows = this.db.prepare('SELECT * FROM results ORDER BY id DESC').all() as (BatchJobFileResult & { opts: string | null })[];
     return rows.map((row) => ({
       ...row,
+      degraded: row.degraded == null ? undefined : Boolean(row.degraded),
       opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
     }));
   }
@@ -103,6 +109,7 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
       .all(limit) as (BatchJobFileResult & { opts: string | null })[];
     return rows.map((row) => ({
       ...row,
+      degraded: row.degraded == null ? undefined : Boolean(row.degraded),
       opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
     }));
   }
@@ -114,6 +121,7 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
       .all(jobId) as (BatchJobFileResult & { opts: string | null })[];
     return rows.map((row) => ({
       ...row,
+      degraded: row.degraded == null ? undefined : Boolean(row.degraded),
       opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
     }));
   }

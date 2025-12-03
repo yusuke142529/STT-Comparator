@@ -22,6 +22,14 @@
     "retentionDays": 30,
     "maxRows": 100000
   },
+  "providerLimits": {
+    "batchMaxBytes": {
+      "openai": 26214400,
+      "deepgram": 52428800,
+      "elevenlabs": 26214400,
+      "whisper_streaming": 52428800
+    }
+  },
   "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming", "openai"],
   "providerHealth": {
     "refreshMs": 5000

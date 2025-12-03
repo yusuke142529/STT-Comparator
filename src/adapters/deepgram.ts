@@ -5,6 +5,9 @@ import { BaseAdapter } from './base.js';
 
 const DEEPGRAM_WS = 'wss://api.deepgram.com/v1/listen';
 const DEEPGRAM_HTTP = 'https://api.deepgram.com/v1/listen';
+const DEFAULT_DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL ?? 'nova-3';
+const DEFAULT_DEEPGRAM_TIER = process.env.DEEPGRAM_TIER;
+const ENABLE_SMART_FORMAT = process.env.DEEPGRAM_SMART_FORMAT !== '0';
 const MAX_DEEPGRAM_BATCH_ATTEMPTS = 3;
 const IDLE_TIMEOUT_MS = 30_000;
 const HARD_TIMEOUT_MS = 5 * 60 * 1000;
@@ -289,6 +292,13 @@ export class DeepgramAdapter extends BaseAdapter {
       language,
       punctuate: opts.punctuationPolicy === 'none' ? 'false' : 'true',
     });
+    query.set('model', DEFAULT_DEEPGRAM_MODEL);
+    if (DEFAULT_DEEPGRAM_TIER) {
+      query.set('tier', DEFAULT_DEEPGRAM_TIER);
+    }
+    if (ENABLE_SMART_FORMAT) {
+      query.set('smart_format', 'true');
+    }
     if (opts.enableInterim === false) {
       query.set('interim_results', 'false');
     }
@@ -405,6 +415,13 @@ export class DeepgramAdapter extends BaseAdapter {
       language,
       punctuate: opts.punctuationPolicy === 'none' ? 'false' : 'true',
     });
+    query.set('model', DEFAULT_DEEPGRAM_MODEL);
+    if (DEFAULT_DEEPGRAM_TIER) {
+      query.set('tier', DEFAULT_DEEPGRAM_TIER);
+    }
+    if (ENABLE_SMART_FORMAT) {
+      query.set('smart_format', 'true');
+    }
     appendPhraseParameters(query, opts);
     appendVadParameters(query, opts.enableVad);
     const contentType = `audio/l16; rate=${opts.sampleRateHz}; channels=1`;

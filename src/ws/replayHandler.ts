@@ -24,11 +24,13 @@ import type { RealtimeTranscriptLogWriter } from '../storage/realtimeTranscriptS
 const buildFileTranscoderArgs = (filePath: string, sampleRate: number, channels: number) => [
   '-nostdin',
   '-hide_banner',
+  // Relaxed decode to avoid aborting on mildly corrupt files during replay
   '-v',
-  'error',
-  '-xerror',
+  'warning',
+  '-fflags',
+  '+discardcorrupt',
   '-err_detect',
-  'explode',
+  'ignore_err',
   '-re',
   '-i',
   filePath,

@@ -19,10 +19,10 @@ import { convertToPcmReadable } from '../utils/ffmpeg.js';
 import { ensureNormalizedAudio, AudioValidationError } from '../utils/audioIngress.js';
 import { AudioDecodeError } from '../utils/audioNormalizer.js';
 import { cer, rtf, wer } from '../scoring/metrics.js';
-import { matchManifestItem } from '../utils/manifest.js';
+import { matchManifestItem, ManifestMatchError } from '../utils/manifest.js';
 import os from 'node:os';
 import type { JobHistory } from './jobHistory.js';
-import { JobExportService } from './jobExportService.js';
+import type { JobExportService } from './jobExportService.js';
 
 interface FileInput {
   originalname: string;
@@ -211,6 +211,7 @@ export class BatchRunner {
         latencyMs: processingTimeMs,
         text: batchResult.text,
         refText,
+        degraded: normalizationResult.degraded,
         createdAt: new Date().toISOString(),
         opts: job.options as Record<string, unknown>,
         vendorProcessingMs: batchResult.vendorProcessingMs,
@@ -221,11 +222,13 @@ export class BatchRunner {
       job.done += 1;
     } catch (error) {
       const message =
-        error instanceof AudioValidationError || error instanceof AudioDecodeError
-          ? 'audio decode failed (unsupported or corrupted file)'
-          : error instanceof Error
-            ? error.message
-            : 'Unknown adapter error';
+        error instanceof ManifestMatchError
+          ? error.message
+          : error instanceof AudioValidationError || error instanceof AudioDecodeError
+            ? 'audio decode failed (unsupported or corrupted file)'
+            : error instanceof Error
+              ? error.message
+              : 'Unknown adapter error';
       logger.error({
         event: 'batch_failed',
         file: file.originalname,

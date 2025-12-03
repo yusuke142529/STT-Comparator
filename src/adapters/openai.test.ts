@@ -5,7 +5,7 @@ import { OpenAIAdapter } from './openai.js';
 const wsState: { instances: any[] } = { instances: [] };
 
 vi.mock('ws', () => {
-  const { EventEmitter } = require('node:events') as typeof import('node:events');
+  const { EventEmitter } = require('node:events');
   class FakeWebSocket extends EventEmitter {
     url: string;
     sent: Array<string | Buffer> = [];
@@ -53,6 +53,7 @@ describe('OpenAIAdapter streaming', () => {
     const parsed = JSON.parse(firstSend);
     expect(parsed.type).toBe('transcription_session.update');
     expect(parsed.session.input_audio_format).toBe('pcm16');
+    expect(parsed.session.input_audio_sample_rate).toBe(24000);
     expect(parsed.session.input_audio_transcription.language).toBe('en');
 
     const transcripts: string[] = [];
@@ -101,6 +102,30 @@ describe('OpenAIAdapter streaming', () => {
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
     expect(parsed.session.input_audio_transcription.language).toBe('ja');
+  });
+
+  it('commits remaining buffered audio on end even when shorter than min buffer', async () => {
+    const adapter = new OpenAIAdapter();
+    const session = await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 16000,
+      encoding: 'linear16',
+    });
+
+    const ws = wsState.instances.at(-1);
+    // wait for open and session update send
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Send a tiny chunk (<100ms after upsample) so normal commit would skip
+    const tinyPcm = new Int16Array([1, -1, 2, -2]);
+    await session.controller.sendAudio(Buffer.from(tinyPcm.buffer));
+
+    await session.controller.end();
+
+    const hasCommit = ws.sent.some(
+      (m) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit'
+    );
+    expect(hasCommit).toBe(true);
   });
 });
 
@@ -168,6 +193,6 @@ describe('OpenAIAdapter batch', () => {
 });
 
 function ReadableFromBuffer(buf: Buffer): NodeJS.ReadableStream {
-  const { Readable } = require('node:stream') as typeof import('node:stream');
+  const { Readable } = require('node:stream');
   return Readable.from(buf);
 }

@@ -55,6 +55,12 @@ const configSchema = z.object({
       refreshMs: z.number().int().min(1).optional(),
     })
     .default({}),
+  providerLimits: z
+    .object({
+      batchMaxBytes: z.record(z.enum(PROVIDER_IDS), z.number().int().positive()).optional(),
+    })
+    .partial()
+    .default({}),
 });
 
 let cachedConfig: AppConfig | null = null;

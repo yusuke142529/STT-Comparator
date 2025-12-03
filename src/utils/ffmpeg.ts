@@ -5,6 +5,21 @@ import { loadConfig } from '../config.js';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import type { AppConfig } from '../types.js';
 
+export async function assertFfmpegAvailable(): Promise<void> {
+  const ffmpegPath = ffmpegInstaller.path;
+  const code = await new Promise<number>((resolve, reject) => {
+    const proc = spawn(ffmpegPath, ['-version'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    proc.once('error', (err) => reject(err));
+    proc.once('close', (exitCode) => resolve(exitCode ?? -1));
+  }).catch((err) => {
+    throw new Error(`ffmpeg not available: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
+  if (code !== 0) {
+    throw new Error(`ffmpeg not available: exited with code ${code}`);
+  }
+}
+
 export function spawnPcmTranscoder(
   audioConfig: AppConfig['audio']
 ): {
@@ -25,10 +40,6 @@ export function spawnPcmTranscoder(
       '-xerror',
       '-err_detect',
       'explode',
-      '-f',
-      'webm',
-      '-fflags',
-      '+genpts',
       '-use_wallclock_as_timestamps',
       '1',
       '-i',

@@ -43,6 +43,7 @@ export interface PartialTranscript {
   timestamp: number;
   channel: 'mic' | 'file';
   latencyMs?: number;
+  degraded?: boolean;
 }
 
 export type PunctuationPolicy = 'none' | 'basic' | 'full';
@@ -59,6 +60,8 @@ export interface StreamingConfigMessage {
   enableInterim?: boolean;
   contextPhrases?: readonly string[];
   normalizePreset?: string;
+  pcm?: boolean;
+  degraded?: boolean;
   options?: TranscriptionOptions;
 }
 
@@ -159,6 +162,7 @@ export interface EvaluationManifest {
   language: string;
   items: ManifestItem[];
   normalization?: NormalizationConfig;
+  allowBasenameFallback?: boolean;
 }
 
 export interface StorageDriver<T> {
@@ -183,6 +187,7 @@ export interface BatchJobFileResult {
   latencyMs?: number;
   text: string;
   refText?: string;
+  degraded?: boolean;
   opts?: Record<string, unknown>;
   /** ISO timestamp when the record was created (for retention / pruning) */
   createdAt?: string;
@@ -222,6 +227,9 @@ export interface AppConfig {
   };
   providerHealth?: {
     refreshMs?: number;
+  };
+  providerLimits?: {
+    batchMaxBytes?: Partial<Record<ProviderId, number>>;
   };
 }
 

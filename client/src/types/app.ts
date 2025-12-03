@@ -1,9 +1,12 @@
 export interface TranscriptRow {
+  id: string;
   text: string;
   provider: string;
+  channel: 'mic' | 'file';
   isFinal: boolean;
   timestamp: number;
   latencyMs?: number;
+  degraded?: boolean;
 }
 
 export interface TranscriptWord {
@@ -63,6 +66,8 @@ export interface FileResult {
   wer?: number | null;
   rtf?: number | null;
   latencyMs?: number | null;
+  durationSec?: number | null;
+  degraded?: boolean;
   text?: string;
 }
 
@@ -143,6 +148,7 @@ export interface WsPayload {
   provider?: string;
   isFinal?: boolean;
   timestamp?: number;
+  degraded?: boolean;
 }
 
 export type PunctuationPolicy = 'none' | 'basic' | 'full';

@@ -1,6 +1,7 @@
 import { open, stat, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { normalizeToPcmWav, AudioDecodeError } from './audioNormalizer.js';
 import type { AppConfig } from '../types.js';
 
@@ -44,6 +45,39 @@ export interface NormalizedAudio {
 type CacheEntry = Omit<NormalizedAudio, 'release'> & { refCount: number };
 
 const cache = new Map<string, CacheEntry>();
+const PROBE_TIMEOUT_MS = 10_000;
+
+async function probeDurationSec(filePath: string): Promise<number | null> {
+  return new Promise<number | null>((resolve) => {
+    // Use system ffprobe if available; fall back to null on any error.
+    const proc = spawn('ffprobe', [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=nw=1:nk=1',
+      filePath,
+    ]);
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      resolve(null);
+    }, PROBE_TIMEOUT_MS);
+    let stdout = '';
+    proc.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.once('close', () => {
+      clearTimeout(timer);
+      const value = parseFloat(stdout.trim());
+      resolve(Number.isFinite(value) ? value : null);
+    });
+    proc.once('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+  });
+}
 
 async function parseWavHeader(filePath: string): Promise<AudioFormatInfo | null> {
   const fd = await open(filePath, 'r');
@@ -112,19 +146,21 @@ function buildSignature(
   return `${absPath}:${fileMtimeMs}:${fileSize}:sr${targetSampleRate}:ch${targetChannels}:${peakPart}`;
 }
 
+const isPcmWav = (info: AudioFormatInfo | null): boolean =>
+  Boolean(
+    info &&
+      info.container === 'wav' &&
+      info.formatTag === PCM_FORMAT_TAG &&
+      info.bitsPerSample === 16
+  );
+
 function matchesTarget(
   info: AudioFormatInfo | null,
   targetSampleRate: number,
   targetChannels: number
 ): boolean {
-  if (!info) return false;
-  return (
-    info.container === 'wav' &&
-    info.formatTag === PCM_FORMAT_TAG &&
-    info.channels === targetChannels &&
-    info.sampleRate === targetSampleRate &&
-    info.bitsPerSample === 16
-  );
+  if (!info || !isPcmWav(info)) return false;
+  return info.channels === targetChannels && info.sampleRate === targetSampleRate;
 }
 
 export async function ensureNormalizedAudio(
@@ -173,20 +209,28 @@ export async function ensureNormalizedAudio(
 
   const info = await parseWavHeader(inputPath);
 
-  if (enabled && config.ingressNormalize?.maxDurationSec && info?.durationSec) {
-    if (info.durationSec > config.ingressNormalize.maxDurationSec) {
+  let durationSec = info?.durationSec;
+  if (!durationSec) {
+    durationSec = await probeDurationSec(inputPath);
+  }
+
+  if (enabled && config.ingressNormalize?.maxDurationSec && durationSec) {
+    if (durationSec > config.ingressNormalize.maxDurationSec) {
       throw new AudioValidationError(
         'AUDIO_TOO_LONG',
         `audio duration exceeds limit (${config.ingressNormalize.maxDurationSec}s)`,
-        `duration=${info.durationSec}`
+        `duration=${durationSec}`
       );
     }
   }
 
-  const shouldNormalize = enabled ? !matchesTarget(info, targetSampleRate, targetChannels) : false;
+  // 常にPCMへの変換を保証する：正規化が無効でも非PCMは強制変換。
+  const shouldNormalize = enabled
+    ? !matchesTarget(info, targetSampleRate, targetChannels)
+    : !isPcmWav(info);
 
   let resultPath = inputPath;
-  let durationSec = info?.durationSec ?? 0;
+  let effectiveDurationSec = durationSec ?? 0;
   let degraded = false;
   let generated = false;
   let outputStats = stats;
@@ -201,13 +245,16 @@ export async function ensureNormalizedAudio(
         tmpDir,
       });
       resultPath = normalized.normalizedPath;
-      durationSec = normalized.durationSec;
+      effectiveDurationSec = normalized.durationSec;
       degraded = normalized.degraded;
       generated = resultPath !== inputPath;
       outputStats = await stat(resultPath);
     } catch (error) {
       if (error instanceof AudioDecodeError) {
-        throw new AudioValidationError('AUDIO_UNSUPPORTED_FORMAT', 'audio decode failed', error.message);
+        const detail = info
+          ? `container=${info.container ?? 'unknown'}, formatTag=${info.formatTag ?? 'unknown'}, sampleRate=${info.sampleRate ?? 'unknown'}, channels=${info.channels ?? 'unknown'}`
+          : error.message;
+        throw new AudioValidationError('AUDIO_UNSUPPORTED_FORMAT', 'audio decode failed', detail);
       }
       throw error;
     }
@@ -215,7 +262,7 @@ export async function ensureNormalizedAudio(
 
   const entry: CacheEntry = {
     normalizedPath: resultPath,
-    durationSec,
+    durationSec: effectiveDurationSec,
     bytes: outputStats.size,
     degraded,
     generated,

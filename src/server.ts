@@ -3,7 +3,6 @@ import path from 'node:path';
 import { existsSync, createReadStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -29,16 +28,19 @@ import { transcriptionOptionsSchema } from './validation.js';
 import { PreviewStore } from './replay/previewStore.js';
 import { AudioDecodeError } from './utils/audioNormalizer.js';
 import { ensureNormalizedAudio, AudioValidationError } from './utils/audioIngress.js';
+import { assertFfmpegAvailable } from './utils/ffmpeg.js';
 import type {
   ProviderId,
   RealtimeLatencySummary,
   StorageDriver,
   TranscriptionOptions,
   EvaluationManifest,
+  AppConfig,
 } from './types.js';
 import type { ProviderAvailability } from './utils/providerStatus.js';
 import { ReplaySessionStore } from './replay/replaySessionStore.js';
 import type { RealtimeTranscriptStore } from './storage/realtimeTranscriptStore.js';
+import { getBatchMaxBytes } from './utils/providerLimits.js';
 
 loadEnvironment();
 
@@ -67,7 +69,8 @@ interface ParsedBatchRequest {
 
 export function parseBatchRequest(
   req: express.Request,
-  providerAvailability: ProviderAvailability[]
+  providerAvailability: ProviderAvailability[],
+  config: AppConfig
 ): ParsedBatchRequest {
   const files = (req.files as Express.Multer.File[]) ?? [];
   const provider = req.body.provider as ProviderId;
@@ -103,6 +106,14 @@ export function parseBatchRequest(
       options = transcriptionOptionsSchema.parse(parsed) as TranscriptionOptions;
     } catch (err) {
       throw new HttpError(400, `invalid options: ${(err as Error).message}`);
+    }
+  }
+
+  const maxBytes = getBatchMaxBytes(provider, config);
+  if (maxBytes) {
+    const tooLarge = files.find((f) => f.size && f.size > maxBytes);
+    if (tooLarge) {
+      throw new HttpError(413, `file too large for provider (${Math.round(maxBytes / (1024 * 1024))}MB limit)`);
     }
   }
 
@@ -169,6 +180,7 @@ async function bootstrap() {
   const server = createServer(app);
   const streamWss = new WebSocketServer({ noServer: true });
 
+  await assertFfmpegAvailable();
   let config = await loadConfig();
   const providerHealthRefreshMs = config.providerHealth?.refreshMs ?? 5_000;
   const providerStatusCache = new ProviderAvailabilityCache(config, providerHealthRefreshMs);
@@ -273,7 +285,7 @@ async function bootstrap() {
   app.post('/api/jobs/transcribe', upload.array('files'), async (req, res, next) => {
     try {
       const providerAvailability = await providerStatusCache.get();
-      const parsed = parseBatchRequest(req, providerAvailability);
+      const parsed = parseBatchRequest(req, providerAvailability, config);
       const adapter = getAdapter(parsed.provider);
       if (!adapter.supportsBatch) {
         res
@@ -455,6 +467,10 @@ async function bootstrap() {
       }
       if (!req.file.size || req.file.size === 0) {
         throw new HttpError(400, 'audio file is empty');
+      }
+      const providerLimit = getBatchMaxBytes(provider, config);
+      if (providerLimit && req.file.size > providerLimit) {
+        throw new HttpError(413, `audio file too large for provider (${Math.round(providerLimit / (1024 * 1024))}MB limit)`);
       }
       // Guard extremely long inputs that can hang realtime sockets
       const maxBytes = 1024 * 1024 * 200; // ~200MB raw wav upper bound (~20+ minutes 16k mono)

@@ -223,4 +223,33 @@ describe('handleStreamConnection', () => {
     expect(ws.sent.some((m) => JSON.parse(m).type === 'error')).toBe(true);
     expect(ws.closed).toBe(true);
   });
+
+  it('PCM モードでヘッダー付きチャンクを処理し、捕捉タイムスタンプからレイテンシを計算する', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2024-01-01T00:00:00.000Z'));
+    const { handleStreamConnection } = await import('./streamHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+
+    const HEADER_BYTES = 16;
+    const frame = Buffer.alloc(HEADER_BYTES + 4);
+    frame.writeUInt32LE(1, 0);
+    frame.writeDoubleLE(Date.now() - 50, 4); // capture 50ms ago
+    frame.writeFloatLE(50, 12);
+    ws.emit('message', frame, true);
+
+    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
+      await Promise.resolve();
+    }
+    vi.advanceTimersByTime(25);
+
+    const messages = ws.sent.map((m) => JSON.parse(m));
+    const transcript = messages.find((m) => m.type === 'transcript');
+    expect(transcript).toBeDefined();
+    expect(typeof transcript?.latencyMs).toBe('number');
+    expect(transcript?.latencyMs).toBeGreaterThanOrEqual(60);
+  });
 });

@@ -576,7 +576,7 @@ select:focus, input:focus, textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  scroll-behavior: smooth;
+  align-items: stretch;
 }
 
 .transcript-empty {
@@ -680,7 +680,8 @@ select:focus, input:focus, textarea:focus {
 
 /* Message Bubbles */
 .msg-bubble {
-  max-width: 90%;
+  width: 100%;
+  max-width: 100%;
   padding: 1rem 1.25rem;
   border-radius: var(--radius);
   border-top-left-radius: 2px;
@@ -709,6 +710,8 @@ select:focus, input:focus, textarea:focus {
   margin-bottom: 0.5rem;
   font-size: 0.75rem;
   color: var(--c-text-muted);
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .bubble-latency {
@@ -720,20 +723,37 @@ select:focus, input:focus, textarea:focus {
   font-weight: 500;
 }
 
+.bubble-badge {
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+
+.bubble-badge.degraded {
+  color: #9a3412;
+  background: #fff7ed;
+  border-color: rgba(234, 88, 12, 0.4);
+}
+
 .msg-bubble .bubble-text {
   margin: 0;
   font-size: 1rem;
   line-height: 1.6;
   color: var(--c-text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .msg-bubble.interim .bubble-text::after {
-  content: '▋';
+  content: '…';
   display: inline-block;
   color: var(--c-primary);
   margin-left: 4px;
-  animation: blink 1s steps(2) infinite;
   vertical-align: baseline;
+  opacity: 0.6;
 }
 
 .msg-provider {

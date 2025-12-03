@@ -78,6 +78,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState<string | null>(null);
   const [isReplayAudioMuted, setIsReplayAudioMuted] = useState(false);
   const [outputSinkError, setOutputSinkError] = useState<string | null>(null);
+  const [allowDegraded, setAllowDegraded] = useState(false);
   const replayAudioRef = useRef<HTMLAudioElement | null>(null);
   const replayAudioUrlRef = useRef<string | null>(null);
   const transcriptBodyRef = useRef<HTMLDivElement>(null);
@@ -315,7 +316,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     if (streamSession.transcripts.length === 0 || !isAutoScroll) return;
     const container = transcriptBodyRef.current;
     if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
   }, [streamSession.transcripts, isAutoScroll]);
 
   const jumpToBottom = useCallback(() => {
@@ -388,7 +389,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
         streamSession.setError('マイクデバイスが見つかりません。接続とリフレッシュをお試しください。');
         return;
       }
-      void streamSession.startMic(selectedAudioDeviceId ?? undefined);
+      void streamSession.startMic(selectedAudioDeviceId ?? undefined, { allowDegraded });
     } else {
       if (!replayFile) {
         streamSession.setError('再生ファイルを選択してください');
@@ -476,6 +477,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     setEnableInterim,
     enableVad,
     setEnableVad,
+    allowDegraded,
+    setAllowDegraded,
     replayFile,
     handleReplayFileChange,
     replayUploading,
@@ -545,6 +548,15 @@ export const RealtimeView = (props: RealtimeViewProps) => {
           <div>
             <div style={{ fontWeight: 'bold' }}>エラーが発生しました</div>
             <div style={{ fontSize: '0.85rem' }}>{streamSession.error}</div>
+          </div>
+        </div>
+      )}
+      {streamSession.warning && (
+        <div className="banner warning">
+          <Icons.Alert />
+          <div>
+            <div style={{ fontWeight: 'bold' }}>品質低下モード</div>
+            <div style={{ fontSize: '0.85rem' }}>{streamSession.warning}</div>
           </div>
         </div>
       )}

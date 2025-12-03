@@ -42,6 +42,8 @@ interface ControlPanelProps {
   setEnableInterim: (value: boolean) => void;
   enableVad: boolean;
   setEnableVad: (value: boolean) => void;
+  allowDegraded: boolean;
+  setAllowDegraded: (value: boolean) => void;
   replayFile: File | null;
   handleReplayFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   replayUploading: boolean;
@@ -100,6 +102,8 @@ export const ControlPanel = memo(({
   setEnableInterim,
   enableVad,
   setEnableVad,
+  allowDegraded,
+  setAllowDegraded,
   replayFile,
   handleReplayFileChange,
   replayUploading,
@@ -391,6 +395,11 @@ export const ControlPanel = memo(({
           <div className="field" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
             <ToggleSwitch label="途中経過を出力" checked={enableInterim} onChange={setEnableInterim} />
             <ToggleSwitch label="VAD を有効化" checked={enableVad} onChange={setEnableVad} />
+            <ToggleSwitch
+              label="品質低下モードを許可 (16kHz/mono未満でも続行)"
+              checked={allowDegraded}
+              onChange={setAllowDegraded}
+            />
           </div>
           <p className="helper-text">録音/再生は画面下部のフローティングボタンから操作できます。</p>
         </div>
