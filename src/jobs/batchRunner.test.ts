@@ -104,7 +104,7 @@ describe('BatchRunner', () => {
     const store = memoryStore();
     const { runner } = await setupRunner(store);
     const jobSpy = vi.spyOn(runner as any, 'processJob');
-    const { jobId } = await runner.enqueue('mock', 'ja-JP', [{ path: filePath, originalname: 'a.wav', size: 1 }]);
+    const { jobId } = await runner.enqueue(['mock'], 'ja-JP', [{ path: filePath, originalname: 'a.wav', size: 1 }]);
 
     await waitForJob(runner as any, jobId);
 
@@ -156,7 +156,7 @@ describe('BatchRunner', () => {
     const store = memoryStore();
     const { runner } = await setupRunner(store);
     const { jobId } = await runner.enqueue(
-      'mock',
+      ['mock'],
       'ja-JP',
       [{ path: filePath, originalname: 'b.wav', size: 1 }],
       { version: 1, language: 'ja-JP', items: [{ audio: 'a.wav', ref: 'ref' }] }
@@ -212,7 +212,7 @@ describe('BatchRunner', () => {
 
     const store = memoryStore();
     const { runner } = await setupRunner(store);
-    const { jobId } = await runner.enqueue('mock', 'ja-JP', [
+    const { jobId } = await runner.enqueue(['mock'], 'ja-JP', [
       { path: filePathA, originalname: 'a.wav', size: 1 },
       { path: filePathB, originalname: 'b.wav', size: 1 },
     ]);
@@ -220,5 +220,59 @@ describe('BatchRunner', () => {
     const status = await waitForJob(runner as any, jobId);
     expect(status?.total).toBe(2);
     expect((status?.done ?? 0) + (status?.failed ?? 0)).toBe(2);
+  });
+
+  it('processes all selected providers for each file', async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), 'batch-test-'));
+    const filePath = path.join(tmp, 'c.wav');
+    await writeFile(filePath, Buffer.from('c'));
+
+    vi.doMock('../utils/audioIngress.js', () => ({
+      ensureNormalizedAudio: vi.fn(async (p: string) => ({
+        normalizedPath: p,
+        durationSec: 1,
+        bytes: 4,
+        degraded: false,
+        generated: false,
+        signature: 'sig',
+        release: async () => {},
+      })),
+      AudioValidationError: class extends Error {},
+    }));
+
+    vi.doMock('../utils/ffmpeg.js', () => {
+      const stream = new PassThrough();
+      stream.end(Buffer.from('a'));
+      return {
+        convertToPcmReadable: vi.fn(async () => ({
+          stream,
+          durationPromise: Promise.resolve(1),
+        })),
+      };
+    });
+
+    const transcribe = vi.fn(async (_pcm: any, _opts: any) => ({ provider: 'mock', text: 'ok', durationSec: 1 }));
+    vi.doMock('../adapters/index.js', () => ({
+      getAdapter: vi.fn((id: string) => ({
+        id,
+        supportsStreaming: true,
+        supportsBatch: true,
+        startStreaming: vi.fn(),
+        transcribeFileFromPCM: transcribe,
+      })),
+    }));
+
+    const store = memoryStore();
+    const { runner } = await setupRunner(store);
+    const { jobId } = await runner.enqueue(['p1', 'p2'], 'ja-JP', [
+      { path: filePath, originalname: 'c.wav', size: 1 },
+    ]);
+
+    const status = await waitForJob(runner as any, jobId);
+    expect(status?.total).toBe(2);
+    expect(status?.done).toBe(2);
+    expect(store.records).toHaveLength(2);
+    expect(new Set(store.records.map((r) => r.provider))).toEqual(new Set(['p1', 'p2']));
+    expect(transcribe).toHaveBeenCalledTimes(2);
   });
 });

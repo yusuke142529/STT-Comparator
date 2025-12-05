@@ -86,3 +86,13 @@ class PcmWorkletProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor('pcm-worklet', PcmWorkletProcessor);
+/// <reference lib="webworker" />
+
+declare const sampleRate: number;
+declare function registerProcessor(name: string, processorCtor: typeof AudioWorkletProcessor): void;
+
+declare abstract class AudioWorkletProcessor {
+  readonly port: MessagePort;
+  constructor(options?: unknown);
+  abstract process(inputs: Float32Array[][], outputs: Float32Array[][], parameters: Record<string, Float32Array>): boolean;
+}

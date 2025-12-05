@@ -7,14 +7,16 @@ interface TranscriptViewerProps {
   containerRef: RefObject<HTMLDivElement>;
   showJumpButton: boolean;
   onJumpToBottom: () => void;
+  title?: string;
+  helperText?: string;
 }
 
-export const TranscriptViewer = memo(({ transcripts, containerRef, showJumpButton, onJumpToBottom }: TranscriptViewerProps) => (
+export const TranscriptViewer = memo(({ transcripts, containerRef, showJumpButton, onJumpToBottom, title, helperText }: TranscriptViewerProps) => (
   <section className="transcript-panel">
     <div className="transcript-header">
       <div>
-        <p className="helper-text" style={{ marginBottom: 4 }}>Realtime</p>
-        <h3>Live Transcript</h3>
+        <p className="helper-text" style={{ marginBottom: 4 }}>{helperText ?? 'Realtime'}</p>
+        <h3>{title ?? 'Live Transcript'}</h3>
       </div>
       {showJumpButton && (
         <button type="button" className="scroll-hint" onClick={onJumpToBottom}>

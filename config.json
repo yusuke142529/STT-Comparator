@@ -33,5 +33,13 @@
   "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming", "openai"],
   "providerHealth": {
     "refreshMs": 5000
+  },
+  "ws": {
+    "maxPcmQueueBytes": 5242880,
+    "compare": {
+      "backlogSoft": 8,
+      "backlogHard": 32,
+      "maxDropMs": 1000
+    }
   }
 }

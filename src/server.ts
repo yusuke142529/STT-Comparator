@@ -10,6 +10,7 @@ import morgan from 'morgan';
 import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { handleStreamConnection } from './ws/streamHandler.js';
+import { handleCompareStreamConnection } from './ws/compareStreamHandler.js';
 import { handleReplayConnection } from './ws/replayHandler.js';
 import { logger } from './logger.js';
 import { createRealtimeStorage, createRealtimeTranscriptStore, createStorage } from './storage/index.js';
@@ -20,7 +21,7 @@ import { JobExportService } from './jobs/jobExportService.js';
 import { JobHistory } from './jobs/jobHistory.js';
 import { parseManifest } from './utils/manifest.js';
 import { toCsv } from './storage/csvExporter.js';
-import { summarizeJob } from './utils/summary.js';
+import { summarizeJob, summarizeJobByProvider } from './utils/summary.js';
 import { requireProviderAvailable } from './utils/providerStatus.js';
 import { ProviderAvailabilityCache } from './utils/providerAvailabilityCache.js';
 import { getAdapter } from './adapters/index.js';
@@ -61,7 +62,7 @@ interface StatusCodeError extends Error {
 
 interface ParsedBatchRequest {
   files: Express.Multer.File[];
-  provider: ProviderId;
+  providers: ProviderId[];
   lang: string;
   manifest?: EvaluationManifest;
   options?: TranscriptionOptions;
@@ -73,17 +74,48 @@ export function parseBatchRequest(
   config: AppConfig
 ): ParsedBatchRequest {
   const files = (req.files as Express.Multer.File[]) ?? [];
-  const provider = req.body.provider as ProviderId;
+  const provider = req.body.provider as ProviderId | undefined;
+  const providersRaw = req.body.providers as string | string[] | undefined;
   const lang = req.body.lang as string;
-  if (!provider || !lang) {
-    throw new HttpError(400, 'provider and lang are required');
+  if (!provider && !providersRaw) {
+    throw new HttpError(400, 'provider or providers is required');
+  }
+  if (!lang) {
+    throw new HttpError(400, 'lang is required');
   }
   if (files.length === 0) {
     throw new HttpError(400, 'no files uploaded');
   }
 
+  const providers = (() => {
+    if (providersRaw) {
+      try {
+        const parsed = Array.isArray(providersRaw)
+          ? providersRaw
+          : (() => {
+              const raw = providersRaw as string;
+              if (raw.trim().startsWith('[')) {
+                return JSON.parse(raw) as unknown;
+              }
+              return raw.split(',').map((v) => v.trim()).filter(Boolean);
+            })();
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          throw new Error('providers must be a non-empty array');
+        }
+        return Array.from(new Set(parsed)) as ProviderId[];
+      } catch (err) {
+        throw new HttpError(400, `invalid providers: ${(err as Error).message}`);
+      }
+    }
+    return [provider as ProviderId];
+  })();
+
+  if (providers.length === 0) {
+    throw new HttpError(400, 'providers must not be empty');
+  }
+
   try {
-    requireProviderAvailable(providerAvailability, provider, 'batch');
+    providers.forEach((p) => requireProviderAvailable(providerAvailability, p, 'batch'));
   } catch (err) {
     const statusCode = (err as StatusCodeError).statusCode ?? 400;
     const message = err instanceof Error ? err.message : 'provider validation failed';
@@ -109,15 +141,20 @@ export function parseBatchRequest(
     }
   }
 
-  const maxBytes = getBatchMaxBytes(provider, config);
-  if (maxBytes) {
-    const tooLarge = files.find((f) => f.size && f.size > maxBytes);
-    if (tooLarge) {
-      throw new HttpError(413, `file too large for provider (${Math.round(maxBytes / (1024 * 1024))}MB limit)`);
+  for (const p of providers) {
+    const maxBytes = getBatchMaxBytes(p, config);
+    if (maxBytes) {
+      const tooLarge = files.find((f) => f.size && f.size > maxBytes);
+      if (tooLarge) {
+        throw new HttpError(
+          413,
+          `file too large for provider ${p} (${Math.round(maxBytes / (1024 * 1024))}MB limit)`
+        );
+      }
     }
   }
 
-  return { files, provider, lang, manifest, options };
+  return { files, providers, lang, manifest, options };
 }
 
 export function createRealtimeLatencyHandler(
@@ -286,15 +323,17 @@ async function bootstrap() {
     try {
       const providerAvailability = await providerStatusCache.get();
       const parsed = parseBatchRequest(req, providerAvailability, config);
-      const adapter = getAdapter(parsed.provider);
-      if (!adapter.supportsBatch) {
-        res
-          .status(400)
-          .json({ message: `Provider ${parsed.provider} does not support batch transcription` });
-        return;
+      for (const provider of parsed.providers) {
+        const adapter = getAdapter(provider);
+        if (!adapter.supportsBatch) {
+          res
+            .status(400)
+            .json({ message: `Provider ${provider} does not support batch transcription` });
+          return;
+        }
       }
       const job = await batchRunner.enqueue(
-        parsed.provider,
+        parsed.providers,
         parsed.lang,
         parsed.files.map((file) => ({ path: file.path, size: file.size, originalname: file.originalname })),
         parsed.manifest,
@@ -350,6 +389,11 @@ async function bootstrap() {
         return;
       }
       const summary = summarizeJob(results);
+      const groupBy = (req.query.groupBy as string) ?? 'aggregate';
+      if (groupBy === 'provider') {
+        res.json({ summary, byProvider: summarizeJobByProvider(results) });
+        return;
+      }
       res.json(summary);
     } catch (error) {
       res.status(500).json({ message: (error as Error).message });
@@ -563,6 +607,66 @@ async function bootstrap() {
     });
   });
 
+  const streamCompareWss = new WebSocketServer({ noServer: true });
+
+  streamCompareWss.on('connection', (ws, req) => {
+    const url = new URL(req.url ?? '', 'http://localhost');
+    const providersParam = url.searchParams.get('providers');
+    const lang = url.searchParams.get('lang') ?? 'ja-JP';
+    const origin = req.headers.origin;
+    const allowedOrigins = parseAllowedOrigins();
+
+    const sendWsError = (message: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'error', message }));
+      }
+      ws.close();
+    };
+
+    if (!isOriginAllowed(origin, allowedOrigins)) {
+      sendWsError('origin not allowed');
+      return;
+    }
+
+    const providers = (providersParam ?? '')
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0) as ProviderId[];
+
+    if (providers.length < 2) {
+      sendWsError('providers query param must include at least two entries');
+      return;
+    }
+
+    (async () => {
+      const providerAvailability = await providerStatusCache.get();
+      try {
+        providers.forEach((provider) => {
+          requireProviderAvailable(providerAvailability, provider, 'streaming');
+        });
+      } catch (err) {
+        sendWsError((err as Error).message);
+        return;
+      }
+
+      try {
+        await handleCompareStreamConnection(
+          ws,
+          providers,
+          lang,
+          realtimeLatencyStore,
+          realtimeTranscriptLogStore
+        );
+      } catch (error) {
+        logger.error({ event: 'ws_handler_error', message: (error as Error).message });
+        sendWsError((error as Error).message ?? 'streaming compare handler error');
+      }
+    })().catch((error) => {
+      logger.error({ event: 'ws_handler_error', message: error.message });
+      sendWsError(error.message ?? 'streaming compare connection error');
+    });
+  });
+
   const replayWss = new WebSocketServer({ noServer: true });
 
   replayWss.on('connection', (ws, req) => {
@@ -620,6 +724,10 @@ async function bootstrap() {
     const url = new URL(req.url ?? '', 'http://localhost');
     if (url.pathname === '/ws/stream') {
       streamWss.handleUpgrade(req, socket, head, (ws) => streamWss.emit('connection', ws, req));
+      return;
+    }
+    if (url.pathname === '/ws/stream/compare') {
+      streamCompareWss.handleUpgrade(req, socket, head, (ws) => streamCompareWss.emit('connection', ws, req));
       return;
     }
     if (url.pathname === '/ws/replay') {

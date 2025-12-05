@@ -4,8 +4,12 @@ import { fmt } from '../../utils/metrics';
 import type { FileResult, JobStatus, PunctuationPolicy, ProviderInfo, SubmitBatchInput } from '../../types/app';
 
 interface BatchViewProps {
-  provider: string;
-  setProvider: (value: string) => void;
+  primaryProvider: string;
+  setPrimaryProvider: (value: string) => void;
+  secondaryProvider: string | null;
+  setSecondaryProvider: (value: string | null) => void;
+  compareMode: boolean;
+  setCompareMode: (value: boolean) => void;
   providers: ProviderInfo[];
   dictionary: string;
   setDictionary: Dispatch<SetStateAction<string>>;
@@ -25,8 +29,12 @@ interface BatchViewProps {
 }
 
 export const BatchView = ({
-  provider,
-  setProvider,
+  primaryProvider,
+  setPrimaryProvider,
+  secondaryProvider,
+  setSecondaryProvider,
+  compareMode,
+  setCompareMode,
   providers,
   dictionary,
   setDictionary,
@@ -47,10 +55,17 @@ export const BatchView = ({
   const [files, setFiles] = useState<FileList | null>(null);
   const [manifestJson, setManifestJson] = useState('');
 
-  const selectedProvider = useMemo(() => providers.find((item) => item.id === provider), [providers, provider]);
-  const selectedProviderAvailable = selectedProvider?.available ?? true;
-  const selectedProviderBatchReady = selectedProviderAvailable && (selectedProvider?.supportsBatch ?? true);
-  const dictionarySupported = selectedProvider?.supportsDictionaryPhrases !== false;
+  const primary = useMemo(() => providers.find((item) => item.id === primaryProvider), [providers, primaryProvider]);
+  const secondary = useMemo(
+    () => (secondaryProvider ? providers.find((item) => item.id === secondaryProvider) : undefined),
+    [providers, secondaryProvider]
+  );
+  const selectedProviderAvailable = primary?.available ?? true;
+  const selectedProviderBatchReady = selectedProviderAvailable && (primary?.supportsBatch ?? true);
+  const dictionarySupported = primary?.supportsDictionaryPhrases !== false;
+  const secondaryProviderReady = compareMode
+    ? Boolean(secondary?.available && (secondary?.supportsBatch ?? true) && secondaryProvider !== primaryProvider)
+    : true;
 
   const progress = useMemo(() => {
     if (!jobStatus || jobStatus.total === 0) return 0;
@@ -62,10 +77,17 @@ export const BatchView = ({
   };
 
   const handleSubmit = () => {
+    const chosenProviders = compareMode && secondaryProvider
+      ? [primaryProvider, secondaryProvider].filter((v, idx, arr) => arr.indexOf(v) === idx)
+      : [primaryProvider];
+    if (compareMode && chosenProviders.length < 2) {
+      alert('比較する2つのプロバイダーを選択してください');
+      return;
+    }
     submitBatch({
       files,
       manifestJson,
-      provider,
+      providers: chosenProviders,
       lang,
       dictionaryPhrases,
       enableVad,
@@ -96,16 +118,40 @@ export const BatchView = ({
         </div>
         <div className="control-group">
           <label>プロバイダー</label>
-          <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+          <select value={primaryProvider} onChange={(event) => setPrimaryProvider(event.target.value)}>
             {providers.map((p) => (
               <option key={p.id} value={p.id} disabled={!p.available}>{p.id}</option>
             ))}
           </select>
         </div>
         <div className="control-group">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={compareMode}
+              onChange={(event) => setCompareMode(event.target.checked)}
+            />
+            2プロバイダーで比較
+          </label>
+          <select
+            value={secondaryProvider ?? ''}
+            onChange={(event) => setSecondaryProvider(event.target.value || null)}
+            disabled={!compareMode}
+          >
+            <option value="">選択してください</option>
+            {providers
+              .filter((p) => p.id !== primaryProvider)
+              .map((p) => (
+                <option key={p.id} value={p.id} disabled={!p.available || !p.supportsBatch}>
+                  {p.id}
+                </option>
+              ))}
+          </select>
+        </div>
+        <div className="control-group">
           <label>句読点</label>
           <select value={punctuationPolicy} onChange={(event) => setPunctuationPolicy(event.target.value as PunctuationPolicy)}>
-            { (provider === 'deepgram' ? ['none', 'full'] : ['none', 'basic', 'full'] as PunctuationPolicy[]).map((opt) => (
+            { (primaryProvider === 'deepgram' ? ['none', 'full'] : ['none', 'basic', 'full'] as PunctuationPolicy[]).map((opt) => (
               <option key={opt} value={opt}>{opt}</option>
             ))}
           </select>
@@ -113,12 +159,20 @@ export const BatchView = ({
         <div className="control-group">
           <label>並列数</label>
           <input type="number" min={1} max={8} value={parallel} onChange={(event) => setParallel(Number(event.target.value) || 1)} />
+          <div className="muted" style={{ fontSize: '0.75rem' }}>
+            ファイルの同時処理数。複数プロバイダー比較時はサーバ側でプロバイダー数まで自動的に切り上げ、同じ音源を同時並行で転写します。
+          </div>
         </div>
         <div className="control-group">
           <button
             className="btn btn-primary"
             onClick={handleSubmit}
-            disabled={!selectedProviderAvailable || !selectedProviderBatchReady || isBatchRunning}
+            disabled={
+              !selectedProviderAvailable ||
+              !selectedProviderBatchReady ||
+              !secondaryProviderReady ||
+              isBatchRunning
+            }
             style={{ height: '44px' }}
           >
             {isBatchRunning ? '処理中...' : (<><Icons.Play /> ジョブ実行</>)}

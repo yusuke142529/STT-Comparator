@@ -40,6 +40,7 @@ export async function handleStreamConnection(
   let lastAudioSentAt: number | null = null;
   let firstCaptureTs: number | null = null;
   let lastCaptureTs: number | null = null;
+  const captureTsQueue: Array<number | undefined> = [];
   const sessionId = randomUUID();
   const latencies: number[] = [];
   let lastTranscriptSignature: string | null = null;
@@ -105,7 +106,9 @@ export async function handleStreamConnection(
       if (!chunk) break;
       queuedBytes -= chunk.length;
       try {
-        await controller.sendAudio(bufferToArrayBuffer(chunk));
+        const captureTs = lastCaptureTs ?? firstCaptureTs ?? Date.now();
+        await controller.sendAudio(bufferToArrayBuffer(chunk), { captureTs });
+        captureTsQueue.push(captureTs);
       } catch (err) {
         return handleFatal(err as Error);
       }
@@ -124,11 +127,13 @@ export async function handleStreamConnection(
       }
       return;
     }
+    const captureTs = lastCaptureTs ?? firstCaptureTs ?? Date.now();
     try {
-      await controller.sendAudio(bufferToArrayBuffer(chunk));
+      await controller.sendAudio(bufferToArrayBuffer(chunk), { captureTs });
     } catch (err) {
       return handleFatal(err as Error);
     }
+    captureTsQueue.push(captureTs);
     const now = Date.now();
     if (!firstAudioSentAt) firstAudioSentAt = now;
     lastAudioSentAt = now;
@@ -171,8 +176,9 @@ export async function handleStreamConnection(
           });
           controller = streamingSession.controller;
           streamingSession.onData((transcript) => {
-            const baseTs = lastCaptureTs ?? firstCaptureTs ?? lastAudioSentAt ?? firstAudioSentAt;
-            const latencyMs = typeof baseTs === 'number' ? Date.now() - baseTs : 0;
+            const originCaptureTs =
+              captureTsQueue.shift() ?? lastCaptureTs ?? firstCaptureTs ?? lastAudioSentAt ?? firstAudioSentAt;
+            const latencyMs = typeof originCaptureTs === 'number' ? Date.now() - originCaptureTs : 0;
             if (typeof latencyMs === 'number') {
               latencies.push(latencyMs);
             }
@@ -181,6 +187,7 @@ export async function handleStreamConnection(
               ...transcript,
               channel: transcript.channel ?? 'mic',
               latencyMs,
+              originCaptureTs: originCaptureTs ?? undefined,
               degraded: sessionDegraded,
             };
             if (!shouldEmitTranscript(payload)) {

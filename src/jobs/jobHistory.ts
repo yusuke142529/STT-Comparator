@@ -1,15 +1,17 @@
 import type { StorageDriver, BatchJobFileResult } from '../types.js';
-import { summarizeJob } from '../utils/summary.js';
+import { summarizeJob, summarizeJobByProvider } from '../utils/summary.js';
 import type { JobSummary } from '../utils/summary.js';
 
 export interface JobHistoryEntry {
   jobId: string;
   provider: string;
+  providers: string[];
   lang: string;
   createdAt: string;
   updatedAt: string;
   total: number;
   summary: JobSummary;
+  summaryByProvider?: Record<string, JobSummary>;
 }
 
 export class JobHistory {
@@ -44,18 +46,22 @@ export class JobHistory {
   private buildEntry(jobId: string, rows: BatchJobFileResult[]): JobHistoryEntry | null {
     if (rows.length === 0) return null;
     const summary = summarizeJob(rows);
-    const provider = rows[0].provider;
+    const summaryByProvider = summarizeJobByProvider(rows);
+    const providers = Array.from(new Set(rows.map((row) => row.provider)));
+    const provider = providers[0];
     const lang = rows[0].lang;
     const createdAt = this.getEarliest(rows)?.createdAt ?? new Date().toISOString();
     const updatedAt = this.getLatest(rows)?.createdAt ?? createdAt;
     return {
       jobId,
       provider,
+      providers,
       lang,
       createdAt,
       updatedAt,
       total: rows.length,
       summary,
+      summaryByProvider,
     };
   }
 

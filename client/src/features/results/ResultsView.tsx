@@ -169,7 +169,7 @@ export const ResultsView = ({
               </option>
               {jobHistory.map((entry) => (
                 <option key={entry.jobId} value={entry.jobId}>
-                  {`${entry.provider} (${entry.total}件) ${new Date(entry.updatedAt).toLocaleString()}`}
+                  {`${(entry.providers ?? [entry.provider]).join(' vs ')} (${entry.total}件) ${new Date(entry.updatedAt).toLocaleString()}`}
                 </option>
               ))}
             </select>
@@ -202,7 +202,7 @@ export const ResultsView = ({
             最新ジョブID: {lastJobId ?? 'なし'}
             {selectedHistoryEntry && (
               <span style={{ marginLeft: 8 }}>
-                ({selectedHistoryEntry.provider} · {new Date(selectedHistoryEntry.updatedAt).toLocaleString()})
+                ({(selectedHistoryEntry.providers ?? [selectedHistoryEntry.provider]).join(' vs ')} · {new Date(selectedHistoryEntry.updatedAt).toLocaleString()})
               </span>
             )}
           </div>

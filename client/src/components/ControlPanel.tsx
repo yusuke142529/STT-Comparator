@@ -14,9 +14,11 @@ import type { MicrophonePermissionStatus } from '../hooks/useMicrophonePermissio
 import type { AudioOutputDevice } from '../hooks/useAudioOutputDevices';
 
 interface ControlPanelProps {
-  provider: string;
+  primaryProvider: string;
+  secondaryProvider: string | null;
   providers: ProviderInfo[];
-  onProviderChange: (value: string) => void;
+  onPrimaryChange: (value: string) => void;
+  onSecondaryChange: (value: string | null) => void;
   inputSource: 'mic' | 'file';
   setInputSource: (value: 'mic' | 'file') => void;
   isStreaming: boolean;
@@ -73,9 +75,11 @@ interface ControlPanelProps {
 }
 
 export const ControlPanel = memo(({
-  provider,
+  primaryProvider,
+  secondaryProvider,
   providers,
-  onProviderChange,
+  onPrimaryChange,
+  onSecondaryChange,
   inputSource,
   setInputSource,
   isStreaming,
@@ -140,7 +144,8 @@ export const ControlPanel = memo(({
     setSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
-  const selectedProviderInfo = useMemo(() => providers.find((item) => item.id === provider), [providers, provider]);
+  const selectedProviderInfo = useMemo(() => providers.find((item) => item.id === primaryProvider), [providers, primaryProvider]);
+  const selectedSecondaryInfo = useMemo(() => providers.find((item) => item.id === secondaryProvider), [providers, secondaryProvider]);
 
   const dictionaryDisabled = selectedProviderInfo?.supportsDictionaryPhrases === false;
   const punctuationDisabled = selectedProviderInfo?.supportsPunctuationPolicy === false;
@@ -164,8 +169,8 @@ export const ControlPanel = memo(({
         </button>
         <div className="panel-card__body" aria-hidden={!sections.input}>
           <div className="field">
-            <label>プロバイダー</label>
-            <select value={provider} onChange={(event) => onProviderChange(event.target.value)}>
+            <label>Primary プロバイダー</label>
+            <select value={primaryProvider} onChange={(event) => onPrimaryChange(event.target.value)}>
               {providers.map((p) => (
                 <option key={p.id} value={p.id} disabled={!p.available}>
                   {p.id}
@@ -178,6 +183,27 @@ export const ControlPanel = memo(({
               <p className="helper-text">OpenAI はサーバ側で 16kHz → 24kHz に変換して送信します（OPENAI_API_KEY が必要）。</p>
             )}
             {realtimeNote && <p className="helper-text">{realtimeNote}</p>}
+          </div>
+          <div className="field">
+            <label>Secondary プロバイダー (任意)</label>
+            <select
+              value={secondaryProvider ?? ''}
+              onChange={(event) => onSecondaryChange(event.target.value || null)}
+              disabled={isStreaming}
+            >
+              <option value="">未選択（単独ストリーム）</option>
+              {providers
+                .filter((p) => p.id !== primaryProvider)
+                .map((p) => (
+                  <option key={p.id} value={p.id} disabled={!p.available}>
+                    {p.id}
+                    {!p.available ? ' (利用不可)' : ''}
+                  </option>
+                ))}
+            </select>
+            {secondaryProvider && selectedSecondaryInfo?.reason && (
+              <p className="helper-text">{selectedSecondaryInfo.reason}</p>
+            )}
           </div>
           <div className="field">
             <label>入力モード</label>

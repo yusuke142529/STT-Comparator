@@ -106,7 +106,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 8. Stop で MediaRecorder 停止 → FFmpeg stdin close → Adapter end → WS close。
 
 ### 8.2 バッチ
-1. UI で files[] と ref_json（任意）を指定し Run。並列度 options.parallel。
+1. UI で files[] と ref_json（任意）を指定し Run。並列度 options.parallel は「同時に処理するファイル数」を意味し、複数プロバイダー指定時はサーバ側で provider 数までは自動で引き上げ（config.jobs.maxParallel を上限）て同一ファイルを並列に転写し、公平な比較を担保する。
 2. POST `/api/jobs/transcribe` (multipart/form-data): files[], provider, lang, ref_json, options。
 3. サーバ: jobId 発行 → 各ファイルを FFmpeg で PCM 化 → Adapter.transcribeFileFromPCM → Scoring → Storage に保存。
 4. UI: GET `/api/jobs/:jobId/status` で進捗ポーリング。
@@ -220,7 +220,11 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
   "audio": { "targetSampleRate": 16000, "targetChannels": 1, "chunkMs": 250 },
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": true },
   "storage": { "driver": "jsonl", "path": "./runs/2025-11-19" }, // driver は jsonl または sqlite
-  "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"] // ローカル用途の現行デフォルト（`mock` は任意追加）
+  "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
+  "ws": {
+    "maxPcmQueueBytes": 5242880,
+    "compare": { "backlogSoft": 8, "backlogHard": 32, "maxDropMs": 1000 } // Realtime比較用バックログ制御
+  }
 }
 ```
 - `providerHealth.refreshMs` を指定すると `/api/providers` のヘルスチェック結果を再計算する間隔（ミリ秒）を調整できます。デフォルト 5000 によりローカルの `whisper_streaming` 等を起動した直後でも数秒で「利用可能」へ切り替わるようになり、同エンドポイントは TTL 内でキャッシュを再利用して過剰なヘルスチェックを防ぎます。即時再評価が必要なときは `/api/admin/reload-config` を叩いてください。

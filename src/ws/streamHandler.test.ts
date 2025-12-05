@@ -32,7 +32,7 @@ describe('handleStreamConnection', () => {
     let onDataHandler: ((t: any) => void) | null = null;
 
     const controller = {
-      sendAudio: vi.fn(async () => {
+      sendAudio: vi.fn(async (_chunk?: ArrayBufferLike, _meta?: { captureTs?: number }) => {
         setTimeout(() => {
           onDataHandler?.({ provider: 'mock', isFinal: false, text: 'hi', timestamp: Date.now(), channel: 'mic' });
         }, 20);

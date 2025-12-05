@@ -42,3 +42,16 @@ export function summarizeJob(results: BatchJobFileResult[]): JobSummary {
     latencyMs: summarize(results.map((r) => r.latencyMs)),
   };
 }
+
+export function summarizeJobByProvider(
+  results: BatchJobFileResult[]
+): Record<string, JobSummary> {
+  const grouped = results.reduce<Record<string, BatchJobFileResult[]>>((acc, row) => {
+    const key = row.provider;
+    acc[key] = acc[key] ? [...acc[key], row] : [row];
+    return acc;
+  }, {});
+  return Object.fromEntries(
+    Object.entries(grouped).map(([provider, rows]) => [provider, summarizeJob(rows)])
+  );
+}

@@ -231,6 +231,7 @@ export class OpenAIAdapter extends BaseAdapter {
             type: 'transcription_session.update',
             session: {
               input_audio_format: 'pcm16',
+              input_audio_sample_rate: RESAMPLED_SAMPLE_RATE,
               input_audio_transcription: {
                 model,
                 // OpenAI Realtime only accepts ISO 639-1/3 codes (e.g. "ja", "en").
@@ -344,7 +345,7 @@ export class OpenAIAdapter extends BaseAdapter {
     });
 
     const controller = {
-      async sendAudio(chunk: ArrayBufferLike) {
+      async sendAudio(chunk: ArrayBufferLike, _meta?: { captureTs?: number }) {
         await wsReady;
         const pcm = Buffer.from(chunk);
         const upsampled = resampler.resample(pcm);

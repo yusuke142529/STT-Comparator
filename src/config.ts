@@ -47,6 +47,14 @@ const configSchema = z.object({
   ws: z
     .object({
       maxPcmQueueBytes: z.number().min(128 * 1024).max(100 * 1024 * 1024).default(5 * 1024 * 1024),
+      compare: z
+        .object({
+          backlogSoft: z.number().int().min(1).max(10_000).default(8),
+          backlogHard: z.number().int().min(2).max(20_000).default(32),
+          maxDropMs: z.number().int().min(0).max(60_000).default(1000),
+        })
+        .partial()
+        .default({}),
     })
     .partial()
     .default({}),

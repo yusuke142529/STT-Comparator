@@ -360,7 +360,7 @@ export class ElevenLabsAdapter extends BaseAdapter {
     };
 
     const controller = {
-      async sendAudio(chunk: ArrayBufferLike) {
+      async sendAudio(chunk: ArrayBufferLike, _meta?: { captureTs?: number }) {
         const audioBuffer = Buffer.from(chunk);
         await sendMessage({
           message_type: 'input_audio_chunk',

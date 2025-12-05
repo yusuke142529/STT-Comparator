@@ -1,4 +1,4 @@
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type PluginOption, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import net from 'node:net';
 import path from 'node:path';
@@ -107,10 +107,10 @@ async function ensureBackendStarted(): Promise<void> {
   await backendEnsurePromise;
 }
 
-const backendStarterPlugin = {
+const backendStarterPlugin: PluginOption = {
   name: 'stt-comparator-backend-starter',
   apply: 'serve' as const,
-  async configureServer(server: { httpServer: HttpServer | null }) {
+  async configureServer(server: ViteDevServer) {
     await ensureBackendStarted();
     registerExitHandlers();
     server.httpServer?.once('close', cleanupBackend);

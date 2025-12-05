@@ -6,7 +6,7 @@ interface UseStreamSessionConfig {
   chunkMs: number;
   apiBase: string;
   buildStreamingConfig: () => Record<string, unknown>;
-  buildWsUrl: (path: 'stream' | 'replay', sessionId?: string) => string;
+  buildWsUrl: (path: 'stream' | 'stream-compare' | 'replay' | 'replay-multi', providers: string[], sessionId?: string) => string;
   retry: RetryController;
   onSessionClose?: () => void;
 }
@@ -27,13 +27,13 @@ const buildAudioConstraints = (deviceId?: string): MediaTrackConstraints | boole
   if (supported.echoCancellation) constraints.echoCancellation = false;
   if (supported.noiseSuppression) constraints.noiseSuppression = false;
   if (supported.autoGainControl) constraints.autoGainControl = false;
-  if (supported.latency) constraints.latency = 0.01;
   return Object.keys(constraints).length > 0 ? constraints : deviceId ? { deviceId: { exact: deviceId } } : true;
 };
 
 export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, buildWsUrl, retry, onSessionClose }: UseStreamSessionConfig) => {
   const [transcripts, setTranscripts] = useState<TranscriptRow[]>([]);
   const [latencies, setLatencies] = useState<number[]>([]);
+  const [latenciesByProvider, setLatenciesByProvider] = useState<Record<string, number[]>>({});
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,15 +90,16 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
             setSessionId(payload.sessionId);
             retry.reset();
           } else if (payload.type === 'transcript' && payload.text && typeof payload.timestamp === 'number') {
-            const channel = (payload as { channel?: string }).channel ?? 'mic';
+            const channel = ((payload as { channel?: string }).channel ?? 'mic') as 'mic' | 'file';
             const isFinal = !!payload.isFinal;
             const provider = payload.provider || '';
             const mergeWindowMs = Math.max(chunkMs * 2, 800);
 
             setTranscripts((prev) => {
               const next = [...prev];
-              const currentInterimId = interimByChannelRef.current[channel];
-              const lastFinalId = lastFinalByChannelRef.current[channel];
+              const key = `${provider}|${channel}`;
+              const currentInterimId = interimByChannelRef.current[key];
+              const lastFinalId = lastFinalByChannelRef.current[key];
 
               const applyUpdate = (targetId: string) => {
                 const idx = next.findIndex((row) => row.id === targetId);
@@ -120,8 +121,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
 
               if (isFinal) {
                 if (currentInterimId && applyUpdate(currentInterimId)) {
-                  interimByChannelRef.current[channel] = null;
-                  lastFinalByChannelRef.current[channel] = currentInterimId;
+                  interimByChannelRef.current[key] = null;
+                  lastFinalByChannelRef.current[key] = currentInterimId;
                   return next;
                 }
 
@@ -157,8 +158,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                   latencyMs: payload.latencyMs,
                   degraded: payload.degraded,
                 });
-                interimByChannelRef.current[channel] = null;
-                lastFinalByChannelRef.current[channel] = id;
+                interimByChannelRef.current[key] = null;
+                lastFinalByChannelRef.current[key] = id;
                 return next.slice(-100);
               }
 
@@ -179,12 +180,16 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                 latencyMs: payload.latencyMs,
                 degraded: payload.degraded,
               });
-              interimByChannelRef.current[channel] = id;
+              interimByChannelRef.current[key] = id;
               return next.slice(-100);
             });
 
             if (isFinal && typeof payload.latencyMs === 'number') {
               setLatencies((prev) => [payload.latencyMs!, ...prev].slice(0, 500));
+              setLatenciesByProvider((prev) => {
+                const current = prev[provider] ?? [];
+                return { ...prev, [provider]: [payload.latencyMs!, ...current].slice(0, 500) };
+              });
             }
           } else if (payload.type === 'error' && payload.message) {
             setError(payload.message);
@@ -230,8 +235,13 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   );
 
   const startMic = useCallback(
-    async (deviceId?: string, options?: { allowDegraded?: boolean }) => {
+    async (deviceId?: string, options?: { allowDegraded?: boolean; providers?: string[] }) => {
       const allowDegraded = options?.allowDegraded ?? false;
+      const providers = options?.providers ?? [];
+      if (providers.length === 0) {
+        setError('プロバイダが選択されていません');
+        return;
+      }
       let degraded = false;
       resetStreamState();
       retry.reset();
@@ -315,7 +325,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           sendPcmChunk(data);
         };
 
-        const socket = new WebSocket(buildWsUrl('stream'));
+        const path = providers.length > 1 ? 'stream-compare' : 'stream';
+        const socket = new WebSocket(buildWsUrl(path, providers));
         wsRef.current = socket;
 
         const cleanup = () => {
@@ -323,7 +334,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           wsRef.current = null;
         };
 
-        attachRealtimeSocketHandlers(socket, () => startMic(deviceId, { allowDegraded }), cleanup);
+        attachRealtimeSocketHandlers(socket, () => startMic(deviceId, { allowDegraded, providers }), cleanup);
 
         socket.addEventListener('open', () => {
           if (wsRef.current !== socket) return;
@@ -379,7 +390,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
         }
 
         const data = (await response.json()) as { sessionId: string };
-        const socket = new WebSocket(buildWsUrl('replay', data.sessionId));
+        const socket = new WebSocket(buildWsUrl('replay', [options.provider], data.sessionId));
         wsRef.current = socket;
 
         const cleanup = () => {
@@ -416,6 +427,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   return {
     transcripts,
     latencies,
+    latenciesByProvider,
     isStreaming,
     error,
     warning,

@@ -43,6 +43,10 @@ export interface PartialTranscript {
   timestamp: number;
   channel: 'mic' | 'file';
   latencyMs?: number;
+  /** Capture timestamp (ms, wall clock) of the audio chunk that produced this transcript, if known. */
+  originCaptureTs?: number;
+  /** Optional sequence number to correlate audio->transcript when providers keep order. */
+  seq?: number;
   degraded?: boolean;
 }
 
@@ -66,7 +70,7 @@ export interface StreamingConfigMessage {
 }
 
 export interface StreamingController {
-  sendAudio(chunk: ArrayBufferLike): Promise<void>;
+  sendAudio(chunk: ArrayBufferLike, meta?: { captureTs?: number; seq?: number }): Promise<void>;
   end(): Promise<void>;
   close(): Promise<void>;
 }
@@ -224,6 +228,11 @@ export interface AppConfig {
   };
   ws?: {
     maxPcmQueueBytes?: number;
+    compare?: {
+      backlogSoft?: number;
+      backlogHard?: number;
+      maxDropMs?: number;
+    };
   };
   providerHealth?: {
     refreshMs?: number;

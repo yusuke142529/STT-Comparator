@@ -11,7 +11,7 @@ function createMockSession(channel: 'mic' | 'file'): StreamingSession {
   } = { data: [], error: [], close: [] };
 
   const controller = {
-    async sendAudio(chunk: ArrayBuffer) {
+    async sendAudio(chunk: ArrayBuffer, _meta?: { captureTs?: number }) {
       // pretend to process chunk
       await delay(10);
       const fakeText = `chunk-${chunk.byteLength}`;

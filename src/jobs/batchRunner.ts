@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
-import type { Readable } from 'node:stream';
 import { once } from 'node:events';
+import { Readable } from 'node:stream';
+import { buffer as streamToBuffer } from 'node:stream/consumers';
 import type {
   BatchJobFileResult,
   EvaluationManifest,
@@ -32,7 +33,7 @@ interface FileInput {
 
 interface JobState {
   id: string;
-  provider: ProviderId;
+  providers: ProviderId[];
   lang: string;
   total: number;
   files: FileInput[];
@@ -43,6 +44,14 @@ interface JobState {
   options?: TranscriptionOptions;
   normalization?: NormalizationConfig;
   errors: { file: string; message: string }[];
+}
+
+interface PreparedFile {
+  normalization: Awaited<ReturnType<typeof ensureNormalizedAudio>>;
+  refText?: string;
+  durationSec: number;
+  degraded: boolean;
+  pcmBuffer: Buffer;
 }
 
 export class BatchRunner {
@@ -60,7 +69,7 @@ export class BatchRunner {
   }
 
   async enqueue(
-    provider: ProviderId,
+    providers: ProviderId[],
     lang: string,
     files: FileInput[],
     manifest?: EvaluationManifest,
@@ -71,12 +80,13 @@ export class BatchRunner {
     }
 
     const config = await loadConfig();
+    const uniqProviders = Array.from(new Set(providers));
     const jobId = randomUUID();
     const job: JobState = {
       id: jobId,
-      provider,
+      providers: uniqProviders,
       lang,
-      total: files.length,
+      total: files.length * uniqProviders.length,
       files,
       done: 0,
       failed: 0,
@@ -94,7 +104,14 @@ export class BatchRunner {
   getStatus(jobId: string) {
     const job = this.jobs.get(jobId);
     if (!job) return null;
-    return { jobId, total: job.total, done: job.done, failed: job.failed, errors: job.errors };
+    return {
+      jobId,
+      total: job.total,
+      done: job.done,
+      failed: job.failed,
+      errors: job.errors,
+      providers: job.providers,
+    };
   }
 
   async getResults(jobId: string): Promise<BatchJobFileResult[] | null> {
@@ -109,25 +126,110 @@ export class BatchRunner {
 
   private async processJob(job: JobState): Promise<void> {
     const config = await loadConfig();
-    const adapter = getAdapter(job.provider);
     const cpuCount = Math.max(1, os.cpus().length || 1);
     const maxParallel = Math.min(cpuCount, config.jobs?.maxParallel ?? cpuCount);
-    const requestedParallel = job.options?.parallel ?? 1;
-    const concurrency = Math.min(Math.max(1, requestedParallel), maxParallel);
-    let cursor = 0;
+    const providerCount = job.providers.length;
+    const requestedParallel = Math.max(1, job.options?.parallel ?? 1);
+    // options.parallel = files in flight. We need providerCount slots per file so
+    // side-by-side comparison sees identical timing. Clamp by maxParallel / CPU.
+    const desiredSlots = providerCount * requestedParallel;
+    const effectiveSlots = Math.min(maxParallel, Math.max(providerCount, desiredSlots));
+    // number of files processed concurrently; at least 1
+    const fileConcurrency = Math.max(1, Math.floor(effectiveSlots / providerCount) || 1);
+    // providers per file allowed to run simultaneously; keep total <= maxParallel
+    const providerConcurrency = Math.max(
+      1,
+      Math.min(providerCount, Math.floor(maxParallel / fileConcurrency) || providerCount)
+    );
+    if (providerConcurrency < providerCount || fileConcurrency * providerConcurrency < desiredSlots) {
+      logger.warn({
+        event: 'batch_parallel_clamped',
+        providers: providerCount,
+        requestedParallelFiles: requestedParallel,
+        effectiveSlots,
+        maxParallel,
+        fileConcurrency,
+        providerConcurrency,
+      });
+    }
+
+    let fileCursor = 0;
+
+    const runProvidersWithLimit = async (
+      providers: ProviderId[],
+      limit: number,
+      fn: (provider: ProviderId) => Promise<void>
+    ) => {
+      let idx = 0;
+      const worker = async () => {
+        while (idx < providers.length) {
+          const current = providers[idx];
+          idx += 1;
+          await fn(current);
+        }
+      };
+      await Promise.all(Array.from({ length: limit }, () => worker()));
+    };
 
     const worker = async () => {
-      while (cursor < job.files.length) {
-        const index = cursor;
-        cursor += 1;
+      while (fileCursor < job.files.length) {
+        const index = fileCursor;
+        fileCursor += 1;
         const file = job.files[index];
         if (!file) break;
-        await this.processSingleFile(file, job, adapter, config);
+
+        let prepared: PreparedFile | null = null;
+        try {
+          prepared = await this.prepareFile(file, job, config);
+        } catch (error) {
+          const message =
+            error instanceof ManifestMatchError
+              ? error.message
+              : error instanceof AudioValidationError || error instanceof AudioDecodeError
+                ? 'audio decode failed (unsupported or corrupted file)'
+                : error instanceof Error
+                  ? error.message
+                  : 'Unknown adapter error';
+          job.failed += providerCount;
+          job.errors.push({ file: `${file.originalname} (all providers)`, message });
+          logger.error({
+            event: 'batch_failed',
+            file: file.originalname,
+            provider: 'all',
+            message,
+          });
+          await this.cleanupPreparedFile(file, prepared);
+          continue;
+        }
+
+        await runProvidersWithLimit(job.providers, providerConcurrency, async (provider) => {
+          try {
+            await this.runProviderTask(file, provider, prepared as PreparedFile, job, config);
+          } catch (error) {
+            const message =
+              error instanceof ManifestMatchError
+                ? error.message
+                : error instanceof AudioValidationError || error instanceof AudioDecodeError
+                  ? 'audio decode failed (unsupported or corrupted file)'
+                  : error instanceof Error
+                    ? error.message
+                    : 'Unknown adapter error';
+            job.failed += 1;
+            job.errors.push({ file: `${file.originalname} (${provider})`, message });
+            logger.error({
+              event: 'batch_failed',
+              file: file.originalname,
+              provider,
+              message,
+            });
+          }
+        });
+
+        await this.cleanupPreparedFile(file, prepared);
       }
     };
 
-    const workers = Array.from({ length: concurrency }, () => worker());
-    await Promise.all(workers);
+    await Promise.all(Array.from({ length: fileConcurrency }, () => worker()));
 
     if (this.jobExporter) {
       try {
@@ -150,100 +252,91 @@ export class BatchRunner {
     this.cleanupTimers.set(job.id, timer);
   }
 
-  private async processSingleFile(
+  private async prepareFile(
     file: FileInput,
     job: JobState,
-    adapter: ReturnType<typeof getAdapter>,
+    config: Awaited<ReturnType<typeof loadConfig>>
+  ): Promise<PreparedFile> {
+    const manifestItem = job.manifest ? matchManifestItem(job.manifest, file.originalname) : undefined;
+    if (job.manifest && !manifestItem) {
+      throw new ManifestMatchError('manifest ref not found for file');
+    }
+
+    const normalization = await ensureNormalizedAudio(file.path, { config, allowCache: true });
+    const sourceStream = createReadStream(normalization.normalizedPath);
+    await once(sourceStream, 'open');
+    const { stream: pcmStream, durationPromise } = await convertToPcmReadable(sourceStream);
+    const pcmBuffer = await streamToBuffer(pcmStream);
+    const durationSec = normalization.durationSec ?? (await durationPromise);
+    if (!durationSec || !Number.isFinite(durationSec)) {
+      throw new Error('duration could not be determined');
+    }
+
+    return {
+      normalization,
+      refText: manifestItem?.ref,
+      durationSec,
+      degraded: normalization.degraded,
+      pcmBuffer,
+    };
+  }
+
+  private async runProviderTask(
+    file: FileInput,
+    provider: ProviderId,
+    prepared: PreparedFile,
+    job: JobState,
     config: Awaited<ReturnType<typeof loadConfig>>
   ): Promise<void> {
-    let sourceStream: Readable | null = null;
-    let normalizedPath: string | null = null;
-    let normalizationResult: Awaited<ReturnType<typeof ensureNormalizedAudio>> | null = null;
-    try {
-      const manifestItem = job.manifest ? matchManifestItem(job.manifest, file.originalname) : undefined;
-      if (job.manifest && !manifestItem) {
-        job.failed += 1;
-        job.errors.push({ file: file.originalname, message: 'manifest ref not found for file' });
-        return;
-      }
+    const adapter = getAdapter(provider);
+    const streamingOpts: StreamingOptions = {
+      language: job.lang,
+      sampleRateHz: config.audio.targetSampleRate,
+      encoding: 'linear16',
+      enableInterim: false,
+      contextPhrases: job.options?.dictionaryPhrases,
+      punctuationPolicy: job.options?.punctuationPolicy,
+      enableVad: job.options?.enableVad,
+      dictionaryPhrases: job.options?.dictionaryPhrases,
+    };
 
-      normalizationResult = await ensureNormalizedAudio(file.path, { config, allowCache: true });
-      normalizedPath = normalizationResult.normalizedPath;
+    const pcmStream = Readable.from(prepared.pcmBuffer);
+    const start = Date.now();
+    const batchResult = await adapter.transcribeFileFromPCM(pcmStream, streamingOpts);
+    const processingTimeMs = Date.now() - start; // server-measured wall clock
+    const durationSec = batchResult.durationSec ?? prepared.durationSec;
 
-      sourceStream = createReadStream(normalizedPath);
-      await once(sourceStream, 'open');
-      const { stream: pcmStream, durationPromise } = await convertToPcmReadable(sourceStream);
-      const maxParallel = Math.min(os.cpus().length, config.jobs?.maxParallel ?? 4);
-      const streamingOpts: StreamingOptions = {
-        language: job.lang,
-        sampleRateHz: config.audio.targetSampleRate,
-        encoding: 'linear16',
-        enableInterim: false,
-        contextPhrases: job.options?.dictionaryPhrases,
-        punctuationPolicy: job.options?.punctuationPolicy,
-        enableVad: job.options?.enableVad,
-        dictionaryPhrases: job.options?.dictionaryPhrases,
-        parallel: Math.min(job.options?.parallel ?? 1, maxParallel),
-      };
-      const start = Date.now();
-      const batchResult = await adapter.transcribeFileFromPCM(pcmStream, streamingOpts);
-      const processingTimeMs = Date.now() - start; // server-measured wall clock
-      const durationSec = batchResult.durationSec ?? normalizationResult.durationSec ?? (await durationPromise);
-      if (!durationSec || !Number.isFinite(durationSec)) {
-        job.failed += 1;
-        job.errors.push({ file: file.originalname, message: 'duration could not be determined' });
-        return;
-      }
-      const refText = manifestItem?.ref;
-      const normalization = job.normalization ?? config.normalization;
+    const normalization = job.normalization ?? config.normalization;
+    const score: BatchJobFileResult = {
+      jobId: job.id,
+      path: file.originalname,
+      provider,
+      lang: job.lang,
+      durationSec,
+      processingTimeMs,
+      rtf: durationSec ? rtf(processingTimeMs, durationSec) : 0,
+      cer: prepared.refText ? cer(prepared.refText, batchResult.text, normalization) : undefined,
+      wer: prepared.refText ? wer(prepared.refText, batchResult.text, normalization) : undefined,
+      latencyMs: processingTimeMs,
+      text: batchResult.text,
+      refText: prepared.refText,
+      degraded: prepared.degraded,
+      createdAt: new Date().toISOString(),
+      opts: job.options as Record<string, unknown>,
+      vendorProcessingMs: batchResult.vendorProcessingMs,
+    };
+    job.results.push(score);
+    await this.storage.append(score);
+    this.jobHistory.recordRow(score);
+    job.done += 1;
+  }
 
-      const score: BatchJobFileResult = {
-        jobId: job.id,
-        path: file.originalname,
-        provider: job.provider,
-        lang: job.lang,
-        durationSec,
-        processingTimeMs,
-        rtf: durationSec ? rtf(processingTimeMs, durationSec) : 0,
-        cer: refText ? cer(refText, batchResult.text, normalization) : undefined,
-        wer: refText ? wer(refText, batchResult.text, normalization) : undefined,
-        // latency is always server-measured wall clock for fairness
-        latencyMs: processingTimeMs,
-        text: batchResult.text,
-        refText,
-        degraded: normalizationResult.degraded,
-        createdAt: new Date().toISOString(),
-        opts: job.options as Record<string, unknown>,
-        vendorProcessingMs: batchResult.vendorProcessingMs,
-      };
-      job.results.push(score);
-      await this.storage.append(score);
-      this.jobHistory.recordRow(score);
-      job.done += 1;
-    } catch (error) {
-      const message =
-        error instanceof ManifestMatchError
-          ? error.message
-          : error instanceof AudioValidationError || error instanceof AudioDecodeError
-            ? 'audio decode failed (unsupported or corrupted file)'
-            : error instanceof Error
-              ? error.message
-              : 'Unknown adapter error';
-      logger.error({
-        event: 'batch_failed',
-        file: file.originalname,
-        message,
-      });
-      job.failed += 1;
-      job.errors.push({ file: file.originalname, message });
-    } finally {
-      sourceStream?.destroy();
-      if (normalizationResult) {
-        void normalizationResult.release().catch(() => undefined);
-      }
-      if (file.path) {
-        void unlink(file.path).catch(() => undefined);
-      }
+  private async cleanupPreparedFile(file: FileInput, prepared: PreparedFile | null): Promise<void> {
+    if (prepared?.normalization) {
+      await prepared.normalization.release().catch(() => undefined);
+    }
+    if (file.path) {
+      await unlink(file.path).catch(() => undefined);
     }
   }
 }

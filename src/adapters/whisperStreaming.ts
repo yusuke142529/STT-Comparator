@@ -189,7 +189,7 @@ export class WhisperStreamingAdapter extends BaseAdapter {
     });
 
     const controller = {
-      async sendAudio(chunk: ArrayBufferLike) {
+      async sendAudio(chunk: ArrayBufferLike, _meta?: { captureTs?: number }) {
         await wsReady;
         resetIdle();
         ws.send(Buffer.from(chunk));

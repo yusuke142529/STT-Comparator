@@ -40,11 +40,13 @@ export interface JobSummary {
 export interface JobHistoryEntry {
   jobId: string;
   provider: string;
+  providers?: string[];
   lang: string;
   createdAt: string;
   updatedAt: string;
   total: number;
   summary: JobSummary;
+  summaryByProvider?: Record<string, JobSummary>;
 }
 
 export interface ProviderInfo {
@@ -156,7 +158,7 @@ export type PunctuationPolicy = 'none' | 'basic' | 'full';
 export interface SubmitBatchInput {
   files: FileList | null;
   manifestJson: string;
-  provider: string;
+  providers: string[];
   lang: string;
   dictionaryPhrases: string[];
   enableVad: boolean;

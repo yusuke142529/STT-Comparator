@@ -34,9 +34,9 @@ export class RealtimeTranscriptStore implements RealtimeTranscriptLogWriter {
       return Number.isFinite(ts) ? ts : 0;
     };
     for (const entry of all) {
-      const existing = sessions.get(entry.sessionId);
-      if (!existing) {
-        sessions.set(entry.sessionId, {
+      const key = `${entry.sessionId}:${entry.provider}`;
+      if (!sessions.has(key)) {
+        sessions.set(key, {
           sessionId: entry.sessionId,
           provider: entry.provider,
           lang: entry.lang,
@@ -45,7 +45,7 @@ export class RealtimeTranscriptStore implements RealtimeTranscriptLogWriter {
           entryCount: 0,
         });
       }
-      const meta = sessions.get(entry.sessionId)!;
+      const meta = sessions.get(key)!;
       if (entry.payload.type === 'session' && typeof entry.payload.startedAt === 'string') {
         meta.startedAt = entry.payload.startedAt;
       }

@@ -106,6 +106,10 @@ export const useBatchJobManager = ({ apiBase, retry, onJobLoaded }: InternalConf
         alert('ファイルを選択してください');
         return;
       }
+      if (!payload.providers || payload.providers.length === 0) {
+        alert('プロバイダーを選択してください');
+        return;
+      }
 
       retry.reset();
       setIsBatchRunning(true);
@@ -143,7 +147,11 @@ export const useBatchJobManager = ({ apiBase, retry, onJobLoaded }: InternalConf
           const uploadName = relativePath && relativePath.length > 0 ? relativePath : file.name;
           form.append('files', file, uploadName);
         }
-        form.append('provider', payload.provider);
+        if (payload.providers.length === 1) {
+          form.append('provider', payload.providers[0]);
+        } else {
+          form.append('providers', JSON.stringify(payload.providers));
+        }
         form.append('lang', payload.lang);
         if (manifestPayload) form.append('ref_json', manifestPayload);
 

@@ -13,8 +13,10 @@ import type { ProviderInfo, PunctuationPolicy } from '../../types/app';
 interface RealtimeViewProps {
   apiBase: string;
   chunkMs: number;
-  provider: string;
-  setProvider: (value: string) => void;
+  primaryProvider: string;
+  secondaryProvider: string | null;
+  setPrimaryProvider: (value: string) => void;
+  setSecondaryProvider: (value: string | null) => void;
   providers: ProviderInfo[];
   dictionary: string;
   setDictionary: Dispatch<SetStateAction<string>>;
@@ -37,8 +39,10 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const {
     apiBase,
     chunkMs,
-    provider,
-    setProvider,
+    primaryProvider,
+    secondaryProvider,
+    setPrimaryProvider,
+    setSecondaryProvider,
     providers,
     dictionary,
     setDictionary,
@@ -58,8 +62,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   } = props;
 
   const selectedProviderInfo = useMemo(
-    () => providers.find((item) => item.id === provider),
-    [providers, provider]
+    () => providers.find((item) => item.id === primaryProvider),
+    [providers, primaryProvider]
   );
 
   const supportsDictionary = selectedProviderInfo?.supportsDictionaryPhrases !== false;
@@ -81,8 +85,10 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const [allowDegraded, setAllowDegraded] = useState(false);
   const replayAudioRef = useRef<HTMLAudioElement | null>(null);
   const replayAudioUrlRef = useRef<string | null>(null);
-  const transcriptBodyRef = useRef<HTMLDivElement>(null);
-  const [isAutoScroll, setIsAutoScroll] = useState(true);
+  const primaryTranscriptBodyRef = useRef<HTMLDivElement>(null);
+  const secondaryTranscriptBodyRef = useRef<HTMLDivElement>(null);
+  const [isAutoScrollPrimary, setIsAutoScrollPrimary] = useState(true);
+  const [isAutoScrollSecondary, setIsAutoScrollSecondary] = useState(true);
 
   const releaseReplayAudioUrl = useCallback(() => {
     if (replayAudioUrlRef.current) {
@@ -202,17 +208,27 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   }, [isReplayAudioMuted, replayAudioUrl, selectedOutputDeviceId, sinkSelectionSupported]);
 
   useEffect(() => {
-    const container = transcriptBodyRef.current;
-    if (!container) return;
+    const ref = primaryTranscriptBodyRef.current;
+    if (!ref) return;
     const handleScroll = () => {
-      const inBottom = container.scrollHeight - (container.scrollTop + container.clientHeight) < 16;
-      setIsAutoScroll(inBottom);
+      const inBottom = ref.scrollHeight - (ref.scrollTop + ref.clientHeight) < 16;
+      setIsAutoScrollPrimary(inBottom);
     };
-    container.addEventListener('scroll', handleScroll, { passive: true });
+    ref.addEventListener('scroll', handleScroll, { passive: true });
     handleScroll();
-    return () => {
-      container.removeEventListener('scroll', handleScroll);
+    return () => ref.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    const ref = secondaryTranscriptBodyRef.current;
+    if (!ref) return;
+    const handleScroll = () => {
+      const inBottom = ref.scrollHeight - (ref.scrollTop + ref.clientHeight) < 16;
+      setIsAutoScrollSecondary(inBottom);
     };
+    ref.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll();
+    return () => ref.removeEventListener('scroll', handleScroll);
   }, []);
 
   useEffect(() => () => {
@@ -273,12 +289,18 @@ const useRealtimeController = (props: RealtimeViewProps) => {
 
   const wsBase = useMemo(() => apiBase.replace(/^http/, 'ws').replace(/\/$/, ''), [apiBase]);
   const buildWsUrl = useCallback(
-    (path: 'stream' | 'replay', sessionId?: string) => {
-      const params = new URLSearchParams({ provider, lang });
+    (path: 'stream' | 'stream-compare' | 'replay' | 'replay-multi', providerList: string[], sessionId?: string) => {
+      const params = new URLSearchParams({ lang });
+      if (path === 'stream-compare') {
+        params.set('providers', providerList.join(','));
+      } else {
+        params.set('provider', providerList[0]);
+      }
       if (sessionId) params.set('sessionId', sessionId);
-      return `${wsBase}/ws/${path}?${params.toString()}`;
+      const normalizedPath = path === 'stream-compare' ? 'stream/compare' : path;
+      return `${wsBase}/ws/${normalizedPath}?${params.toString()}`;
     },
-    [lang, provider, wsBase]
+    [lang, wsBase]
   );
 
   const realtimeRetry = useRetry({ maxAttempts: 3, baseDelayMs: 1000 });
@@ -313,24 +335,66 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   }, [inputSource, replayAudioUrl, streamSession.isStreaming]);
 
   useEffect(() => {
-    if (streamSession.transcripts.length === 0 || !isAutoScroll) return;
-    const container = transcriptBodyRef.current;
-    if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
-  }, [streamSession.transcripts, isAutoScroll]);
+    if (streamSession.transcripts.length === 0) return;
+    if (isAutoScrollPrimary) {
+      const container = primaryTranscriptBodyRef.current;
+      container?.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+    }
+    if (secondaryProvider && isAutoScrollSecondary) {
+      const container = secondaryTranscriptBodyRef.current;
+      container?.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+    }
+  }, [streamSession.transcripts, isAutoScrollPrimary, isAutoScrollSecondary, secondaryProvider]);
 
   const jumpToBottom = useCallback(() => {
-    const container = transcriptBodyRef.current;
-    if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
-    setIsAutoScroll(true);
+    const primary = primaryTranscriptBodyRef.current;
+    primary?.scrollTo({ top: primary.scrollHeight, behavior: 'smooth' });
+    const secondary = secondaryTranscriptBodyRef.current;
+    secondary?.scrollTo({ top: secondary.scrollHeight, behavior: 'smooth' });
+    setIsAutoScrollPrimary(true);
+    setIsAutoScrollSecondary(true);
   }, []);
 
-  const realTimeSummary = useMemo(() => summarizeMetric(streamSession.latencies), [streamSession.latencies]);
+  const primarySummary = useMemo(
+    () => summarizeMetric(streamSession.latenciesByProvider[primaryProvider] ?? []),
+    [primaryProvider, streamSession.latenciesByProvider]
+  );
+  const secondarySummary = useMemo(
+    () => (secondaryProvider ? summarizeMetric(streamSession.latenciesByProvider[secondaryProvider] ?? []) : null),
+    [secondaryProvider, streamSession.latenciesByProvider]
+  );
+  const isAutoScroll = isAutoScrollPrimary && (!secondaryProvider || isAutoScrollSecondary);
 
-  const selectedProvider = useMemo(() => providers.find((item) => item.id === provider), [providers, provider]);
+  const primaryTranscripts = useMemo(
+    () => streamSession.transcripts.filter((row) => row.provider === primaryProvider),
+    [streamSession.transcripts, primaryProvider]
+  );
+  const secondaryTranscripts = useMemo(
+    () => (secondaryProvider ? streamSession.transcripts.filter((row) => row.provider === secondaryProvider) : []),
+    [streamSession.transcripts, secondaryProvider]
+  );
+
+  const selectedProvider = useMemo(
+    () => providers.find((item) => item.id === primaryProvider),
+    [providers, primaryProvider]
+  );
+  const selectedSecondaryProvider = useMemo(
+    () => providers.find((item) => item.id === secondaryProvider),
+    [providers, secondaryProvider]
+  );
   const selectedProviderAvailable = selectedProvider?.available ?? true;
   const selectedProviderStreamingReady = selectedProviderAvailable && (selectedProvider?.supportsStreaming ?? true);
+  const secondaryProviderAvailable = secondaryProvider
+    ? selectedSecondaryProvider?.available ?? false
+    : true;
+  const secondaryProviderStreamingReady = secondaryProvider
+    ? secondaryProviderAvailable && (selectedSecondaryProvider?.supportsStreaming ?? true)
+    : true;
+
+  const activeProviders = useMemo(
+    () => [primaryProvider, ...(secondaryProvider && secondaryProvider !== primaryProvider ? [secondaryProvider] : [])],
+    [primaryProvider, secondaryProvider]
+  );
 
   const micPermissionLabel = useMemo(() => {
     switch (micPermission) {
@@ -377,7 +441,11 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const handleStart = () => {
     streamSession.setError(null);
     if (!selectedProviderStreamingReady) {
-      streamSession.setError('このプロバイダはRealtime非対応か現在利用できません（Batchタブをご利用ください）');
+      streamSession.setError('Primary プロバイダはRealtime非対応か現在利用できません（Batchタブをご利用ください）');
+      return;
+    }
+    if (!secondaryProviderStreamingReady) {
+      streamSession.setError('Secondary プロバイダが利用できません。別のプロバイダを選択するか解除してください。');
       return;
     }
     if (inputSource === 'mic') {
@@ -389,7 +457,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
         streamSession.setError('マイクデバイスが見つかりません。接続とリフレッシュをお試しください。');
         return;
       }
-      void streamSession.startMic(selectedAudioDeviceId ?? undefined, { allowDegraded });
+      void streamSession.startMic(selectedAudioDeviceId ?? undefined, { allowDegraded, providers: activeProviders });
     } else {
       if (!replayFile) {
         streamSession.setError('再生ファイルを選択してください');
@@ -411,7 +479,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
         setPreviewPlaybackError('音声プレビューの初期化が完了していません。ファイルを選びなおして再実行してください。');
       }
       setReplayUploading(true);
-      void streamSession.startReplay(replayFile, { provider, lang }).finally(() => {
+      void streamSession.startReplay(replayFile, { provider: primaryProvider, lang }).finally(() => {
         setReplayUploading(false);
       });
     }
@@ -425,6 +493,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     ? false
     : !selectedProviderAvailable
       || !selectedProviderStreamingReady
+      || !secondaryProviderStreamingReady
       || (inputSource === 'file' && (!replayFile || replayUploading));
 
   const startLabel = streamSession.isStreaming
@@ -441,17 +510,27 @@ const useRealtimeController = (props: RealtimeViewProps) => {
 
   const statCards = (
     <div className="stat-grid">
-      <StatCard title="平均レイテンシ" value={fmt(realTimeSummary.avg)} unit="ms" />
-      <StatCard title="レイテンシ (p50)" value={fmt(realTimeSummary.p50)} unit="ms" />
-      <StatCard title="レイテンシ (p95)" value={fmt(realTimeSummary.p95)} unit="ms" />
-      <StatCard title="サンプル数" value={`${streamSession.latencies.length}`} />
+      <StatCard title={`${primaryProvider} 平均`} value={fmt(primarySummary.avg)} unit="ms" />
+      <StatCard title={`${primaryProvider} p50`} value={fmt(primarySummary.p50)} unit="ms" />
+      <StatCard title={`${primaryProvider} p95`} value={fmt(primarySummary.p95)} unit="ms" />
+      <StatCard title={`${primaryProvider} サンプル`} value={`${streamSession.latenciesByProvider[primaryProvider]?.length ?? 0}`} />
+      {secondaryProvider && (
+        <>
+          <StatCard title={`${secondaryProvider} 平均`} value={fmt(secondarySummary?.avg ?? null)} unit="ms" />
+          <StatCard title={`${secondaryProvider} p50`} value={fmt(secondarySummary?.p50 ?? null)} unit="ms" />
+          <StatCard title={`${secondaryProvider} p95`} value={fmt(secondarySummary?.p95 ?? null)} unit="ms" />
+          <StatCard title={`${secondaryProvider} サンプル`} value={`${streamSession.latenciesByProvider[secondaryProvider]?.length ?? 0}`} />
+        </>
+      )}
     </div>
   );
 
   const controlPanelProps = {
-    provider,
+    primaryProvider,
+    secondaryProvider,
     providers,
-    onProviderChange: setProvider,
+    onPrimaryChange: setPrimaryProvider,
+    onSecondaryChange: setSecondaryProvider,
     inputSource,
     setInputSource,
     isStreaming: streamSession.isStreaming,
@@ -510,9 +589,12 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   return {
     controlPanelProps,
     streamSession,
-    transcriptBodyRef,
+    primaryTranscriptBodyRef,
+    secondaryTranscriptBodyRef,
     statCards,
     isAutoScroll,
+    isAutoScrollPrimary,
+    isAutoScrollSecondary,
     startDisabled,
     startLabel,
     startIcon,
@@ -522,6 +604,10 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     previewPlaybackError,
     setPreviewPlaybackError,
     replayUploading,
+    primaryTranscripts,
+    secondaryTranscripts,
+    primaryProvider,
+    secondaryProvider,
   };
 };
 
@@ -529,15 +615,22 @@ export const RealtimeView = (props: RealtimeViewProps) => {
   const {
     controlPanelProps,
     streamSession,
-    transcriptBodyRef,
+    primaryTranscriptBodyRef,
+    secondaryTranscriptBodyRef,
     statCards,
     isAutoScroll,
+    isAutoScrollPrimary,
+    isAutoScrollSecondary,
     startDisabled,
     startLabel,
     startIcon,
     handleStart,
     stopRealtime,
     jumpToBottom,
+    primaryTranscripts,
+    secondaryTranscripts,
+    primaryProvider,
+    secondaryProvider,
   } = useRealtimeController(props);
 
   return (
@@ -565,12 +658,26 @@ export const RealtimeView = (props: RealtimeViewProps) => {
           <ControlPanel {...controlPanelProps} />
         </div>
         <div className="transcript-column">
-          <TranscriptViewer
-            transcripts={streamSession.transcripts}
-            containerRef={transcriptBodyRef}
-            showJumpButton={!isAutoScroll && streamSession.transcripts.length > 0}
-            onJumpToBottom={jumpToBottom}
-          />
+          <div style={{ display: 'grid', gridTemplateColumns: secondaryProvider ? '1fr 1fr' : '1fr', gap: '12px' }}>
+            <TranscriptViewer
+              transcripts={primaryTranscripts}
+              containerRef={primaryTranscriptBodyRef}
+              showJumpButton={!isAutoScrollPrimary && primaryTranscripts.length > 0}
+              onJumpToBottom={jumpToBottom}
+              title={`${primaryProvider} Transcript`}
+              helperText="Primary"
+            />
+            {secondaryProvider && (
+              <TranscriptViewer
+                transcripts={secondaryTranscripts}
+                containerRef={secondaryTranscriptBodyRef}
+                showJumpButton={!isAutoScrollSecondary && secondaryTranscripts.length > 0}
+                onJumpToBottom={jumpToBottom}
+                title={`${secondaryProvider} Transcript`}
+                helperText="Secondary"
+              />
+            )}
+          </div>
           {statCards}
         </div>
       </div>

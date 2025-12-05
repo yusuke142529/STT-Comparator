@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Icons } from './components/icons';
 import { parseDictionary } from './utils/parseDictionary';
 import { fetchJson } from './utils/fetchJson';
@@ -28,7 +28,9 @@ const tabMeta = [
 ] as const;
 
 export default function App() {
-  const [provider, setProvider] = useState('deepgram');
+  const [primaryProvider, setPrimaryProvider] = useState('deepgram');
+  const [secondaryProvider, setSecondaryProvider] = useState<string | null>(null);
+  const [batchCompareMode, setBatchCompareMode] = useState(false);
   const [lang, setLang] = useState('ja-JP');
   const [dictionary, setDictionary] = useState('');
   const [enableInterim, setEnableInterim] = useState(true);
@@ -87,8 +89,12 @@ export default function App() {
         const data = (await res.json()) as ProviderInfo[];
         setProviders(data);
         const firstAvailable = data.find((item) => item.available)?.id;
-        if (firstAvailable && !data.find((item) => item.id === provider && item.available)) {
-          setProvider(firstAvailable);
+        if (firstAvailable && !data.find((item) => item.id === primaryProvider && item.available)) {
+          setPrimaryProvider(firstAvailable);
+        }
+        const secondCandidate = data.find((item) => item.available && item.id !== firstAvailable)?.id;
+        if (!secondaryProvider && secondCandidate) {
+          setSecondaryProvider(secondCandidate);
         }
         const warning = data
           .filter((item) => !item.available && item.reason)
@@ -114,7 +120,7 @@ export default function App() {
 
     void loadProviders();
     void loadConfig();
-  }, [provider]);
+  }, [primaryProvider, secondaryProvider]);
 
   const refreshLatencyHistory = useCallback(async () => {
     try {
@@ -178,9 +184,9 @@ export default function App() {
 
   const activeTabIndex = tabMeta.findIndex((entry) => entry.id === tab);
   const tabStyles = {
-    '--active-tab': activeTabIndex,
-    '--tabs': tabMeta.length,
-  } as const;
+    '--active-tab': String(activeTabIndex),
+    '--tabs': String(tabMeta.length),
+  } as unknown as CSSProperties;
 
   return (
     <div className="app-shell">
@@ -216,8 +222,10 @@ export default function App() {
         <RealtimeView
           apiBase={API_BASE}
           chunkMs={chunkMs}
-          provider={provider}
-          setProvider={setProvider}
+          primaryProvider={primaryProvider}
+          secondaryProvider={secondaryProvider}
+          setPrimaryProvider={setPrimaryProvider}
+          setSecondaryProvider={setSecondaryProvider}
           providers={providers}
           dictionary={dictionary}
           setDictionary={setDictionary}
@@ -239,8 +247,12 @@ export default function App() {
 
       {tab === 'batch' && (
         <BatchView
-          provider={provider}
-          setProvider={setProvider}
+          primaryProvider={primaryProvider}
+          setPrimaryProvider={setPrimaryProvider}
+          secondaryProvider={secondaryProvider}
+          setSecondaryProvider={setSecondaryProvider}
+          compareMode={batchCompareMode}
+          setCompareMode={setBatchCompareMode}
           providers={providers}
           dictionary={dictionary}
           setDictionary={setDictionary}
