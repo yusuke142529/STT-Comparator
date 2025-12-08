@@ -8,6 +8,6 @@
   "normalization": {
     "nfkc": true,
     "stripPunct": true,
-    "stripSpace": true
+    "stripSpace": false
   }
 }

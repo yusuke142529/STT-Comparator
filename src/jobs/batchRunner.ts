@@ -21,6 +21,8 @@ import { ensureNormalizedAudio, AudioValidationError } from '../utils/audioIngre
 import { AudioDecodeError } from '../utils/audioNormalizer.js';
 import { cer, rtf, wer } from '../scoring/metrics.js';
 import { matchManifestItem, ManifestMatchError } from '../utils/manifest.js';
+import { getProviderSampleRate, isPerProviderTranscodeEnabled } from '../utils/providerAudio.js';
+import { resamplePcmBuffer } from '../utils/ffmpeg.js';
 import os from 'node:os';
 import type { JobHistory } from './jobHistory.js';
 import type { JobExportService } from './jobExportService.js';
@@ -52,6 +54,7 @@ interface PreparedFile {
   durationSec: number;
   degraded: boolean;
   pcmBuffer: Buffer;
+  pcmSampleRate: number;
 }
 
 export class BatchRunner {
@@ -278,6 +281,7 @@ export class BatchRunner {
       durationSec,
       degraded: normalization.degraded,
       pcmBuffer,
+      pcmSampleRate: config.audio.targetSampleRate,
     };
   }
 
@@ -289,9 +293,12 @@ export class BatchRunner {
     config: Awaited<ReturnType<typeof loadConfig>>
   ): Promise<void> {
     const adapter = getAdapter(provider);
+    const providerSampleRate = isPerProviderTranscodeEnabled()
+      ? getProviderSampleRate(provider, config)
+      : config.audio.targetSampleRate;
     const streamingOpts: StreamingOptions = {
       language: job.lang,
-      sampleRateHz: config.audio.targetSampleRate,
+      sampleRateHz: providerSampleRate,
       encoding: 'linear16',
       enableInterim: false,
       contextPhrases: job.options?.dictionaryPhrases,
@@ -300,13 +307,29 @@ export class BatchRunner {
       dictionaryPhrases: job.options?.dictionaryPhrases,
     };
 
-    const pcmStream = Readable.from(prepared.pcmBuffer);
+    const sourceSampleRate = prepared.pcmSampleRate ?? config.audio.targetSampleRate;
+    const pcmBuffer =
+      providerSampleRate === sourceSampleRate
+        ? prepared.pcmBuffer
+        : await resamplePcmBuffer({
+            buffer: prepared.pcmBuffer,
+            inputSampleRate: sourceSampleRate,
+            outputSampleRate: providerSampleRate,
+            channels: config.audio.targetChannels,
+          });
+
+    const pcmStream = Readable.from(pcmBuffer);
     const start = Date.now();
     const batchResult = await adapter.transcribeFileFromPCM(pcmStream, streamingOpts);
     const processingTimeMs = Date.now() - start; // server-measured wall clock
-    const durationSec = batchResult.durationSec ?? prepared.durationSec;
+    const computedDuration =
+      pcmBuffer.length / (2 * config.audio.targetChannels * providerSampleRate);
+    const durationSec = batchResult.durationSec ?? computedDuration ?? prepared.durationSec;
 
     const normalization = job.normalization ?? config.normalization;
+    if (normalization?.stripSpace) {
+      logger.warn({ event: 'normalization_strip_space_enabled', file: file.originalname });
+    }
     const score: BatchJobFileResult = {
       jobId: job.id,
       path: file.originalname,
@@ -324,6 +347,7 @@ export class BatchRunner {
       createdAt: new Date().toISOString(),
       opts: job.options as Record<string, unknown>,
       vendorProcessingMs: batchResult.vendorProcessingMs,
+      normalizationUsed: normalization,
     };
     job.results.push(score);
     await this.storage.append(score);

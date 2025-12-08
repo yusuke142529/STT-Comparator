@@ -7,6 +7,7 @@ import type {
 export const LOG_TYPE_LABELS: Record<RealtimeLogPayloadType, string> = {
   session: 'セッション開始',
   transcript: '文字起こし',
+  normalized: '整列',
   error: 'エラー',
   session_end: 'セッション終了',
 };
@@ -14,6 +15,7 @@ export const LOG_TYPE_LABELS: Record<RealtimeLogPayloadType, string> = {
 export const LOG_TYPE_CLASSES: Record<RealtimeLogPayloadType, string> = {
   session: 'log-type--session',
   transcript: 'log-type--transcript',
+  normalized: 'log-type--normalized',
   error: 'log-type--error',
   session_end: 'log-type--session_end',
 };
@@ -76,6 +78,10 @@ export const describeLogPayload = (payload: RealtimeLogPayload): string => {
       const channel = payload.channel === 'file' ? 'ファイル' : 'マイク';
       return `${channel} (${status}): ${payload.text}`;
     }
+    case 'normalized': {
+      const status = payload.isFinal ? '確定' : '途中';
+      return `整列(${status}) [win ${payload.windowId}] ${payload.textNorm || payload.textRaw || ''}`;
+    }
     case 'error':
       return payload.message;
     case 'session_end':
@@ -109,6 +115,16 @@ export const renderLogMetadata = (
           {payload.words && payload.words.length > 0 ? renderWordDetails(payload.words) : null}
         </>
       );
+    }
+    case 'normalized': {
+      const metadata = renderMetadataRows([
+        ['Window', `#${payload.windowId}`],
+        ['範囲', `${payload.windowStartMs} - ${payload.windowEndMs} ms`],
+        ['確定/途中', payload.isFinal ? '確定' : '途中'],
+        ['リビジョン', `rev${payload.revision}`],
+        ['originCaptureTs', payload.originCaptureTs ? `${payload.originCaptureTs} ms` : null],
+      ]);
+      return metadata;
     }
     case 'error':
       return renderMetadataRows([['メッセージ', payload.message]]);

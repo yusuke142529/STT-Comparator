@@ -78,6 +78,168 @@ export function spawnPcmTranscoder(
   };
 }
 
+export type PcmChunkMeta = {
+  captureTs: number;
+  durationMs: number;
+  seq?: number;
+};
+
+export type PcmResampler = {
+  input: (chunk: Buffer, meta: PcmChunkMeta) => Promise<void>;
+  onChunk: (cb: (chunk: Buffer, meta: PcmChunkMeta) => void) => void;
+  end: () => void;
+  onError: (cb: (err: Error) => void) => void;
+  onClose: (cb: (code: number | null) => void) => void;
+  readonly outputSampleRate: number;
+};
+
+export function createPcmResampler(options: {
+  inputSampleRate: number;
+  outputSampleRate: number;
+  channels: number;
+}): PcmResampler {
+  const { inputSampleRate, outputSampleRate, channels } = options;
+  const bytesPerSample = 2 * channels;
+
+  if (inputSampleRate === outputSampleRate) {
+    // Pass-through path keeps duration/captureTs untouched.
+    let onChunkCb: ((chunk: Buffer, meta: PcmChunkMeta) => void) | null = null;
+    return {
+      async input(chunk, meta) {
+        onChunkCb?.(chunk, { ...meta, seq: meta.seq ?? 0 });
+      },
+      onChunk(cb) {
+        onChunkCb = cb;
+      },
+      end() {
+        /* no-op */
+      },
+      onError() {
+        /* no-op */
+      },
+      onClose() {
+        /* no-op */
+      },
+      outputSampleRate,
+    };
+  }
+
+  const ffmpegPath = ffmpegInstaller.path;
+  const proc = spawn(
+    ffmpegPath,
+    [
+      '-nostdin',
+      '-hide_banner',
+      '-v',
+      'error',
+      '-xerror',
+      '-err_detect',
+      'explode',
+      '-f',
+      's16le',
+      '-ar',
+      String(inputSampleRate),
+      '-ac',
+      String(channels),
+      '-i',
+      'pipe:0',
+      '-ac',
+      String(channels),
+      '-ar',
+      String(outputSampleRate),
+      '-f',
+      's16le',
+      'pipe:1',
+    ],
+    { stdio: ['pipe', 'pipe', 'inherit'] }
+  );
+
+  type MetaState = {
+    captureTs: number;
+    durationMs: number;
+    seq: number;
+    expectedOutputSamples: number;
+    sentOutputSamples: number;
+  };
+
+  const ratio = outputSampleRate / inputSampleRate;
+  const metaQueue: MetaState[] = [];
+  let onChunkCb: ((chunk: Buffer, meta: PcmChunkMeta) => void) | null = null;
+
+  proc.stdout.on('data', (chunk: Buffer) => {
+    if (!onChunkCb || metaQueue.length === 0) {
+      return;
+    }
+    const totalSamples = Math.floor(chunk.length / bytesPerSample);
+    let offsetSamples = 0;
+
+    while (offsetSamples < totalSamples && metaQueue.length > 0) {
+      const current = metaQueue[0];
+      const remaining = current.expectedOutputSamples - current.sentOutputSamples;
+      if (remaining <= 0) {
+        metaQueue.shift();
+        continue;
+      }
+      const takeSamples = Math.min(remaining, totalSamples - offsetSamples);
+      const startByte = offsetSamples * bytesPerSample;
+      const endByte = startByte + takeSamples * bytesPerSample;
+      const slice = chunk.subarray(startByte, endByte);
+
+      const chunkStartMs = current.captureTs + (current.sentOutputSamples / outputSampleRate) * 1000;
+      const chunkDurationMs = (takeSamples / outputSampleRate) * 1000;
+
+      onChunkCb(slice, {
+        captureTs: chunkStartMs,
+        durationMs: chunkDurationMs,
+        seq: current.seq,
+      });
+
+      current.sentOutputSamples += takeSamples;
+      offsetSamples += takeSamples;
+
+      if (current.sentOutputSamples >= current.expectedOutputSamples) {
+        metaQueue.shift();
+      }
+    }
+  });
+
+  const write = async (chunk: Buffer, meta: PcmChunkMeta) => {
+    if (!proc.stdin) return;
+    const inputSamples = Math.floor(chunk.length / bytesPerSample);
+    const expectedOutputSamples = Math.max(0, Math.round(inputSamples * ratio));
+    metaQueue.push({
+      captureTs: meta.captureTs,
+      durationMs: meta.durationMs,
+      seq: meta.seq ?? 0,
+      expectedOutputSamples,
+      sentOutputSamples: 0,
+    });
+    const ok = proc.stdin.write(chunk);
+    if (ok === false) {
+      await once(proc.stdin, 'drain');
+    }
+  };
+
+  return {
+    async input(chunk, meta) {
+      await write(chunk, meta);
+    },
+    onChunk(cb) {
+      onChunkCb = cb;
+    },
+    end() {
+      proc.stdin?.end();
+    },
+    onError(cb) {
+      proc.once('error', cb);
+    },
+    onClose(cb) {
+      proc.once('close', cb);
+    },
+    outputSampleRate,
+  };
+}
+
 export async function convertToPcmReadable(
   input: Buffer | Readable
 ): Promise<{ stream: Readable; durationPromise: Promise<number> }> {
@@ -146,6 +308,58 @@ export async function convertToPcmReadable(
     transcoder.kill('SIGKILL');
   });
   return { stream, durationPromise };
+}
+
+export async function resamplePcmBuffer(options: {
+  buffer: Buffer;
+  inputSampleRate: number;
+  outputSampleRate: number;
+  channels: number;
+}): Promise<Buffer> {
+  const { buffer, inputSampleRate, outputSampleRate, channels } = options;
+  if (inputSampleRate === outputSampleRate) return buffer;
+  const ffmpegPath = ffmpegInstaller.path;
+  const args = [
+    '-nostdin',
+    '-hide_banner',
+    '-v',
+    'error',
+    '-xerror',
+    '-err_detect',
+    'explode',
+    '-f',
+    's16le',
+    '-ar',
+    String(inputSampleRate),
+    '-ac',
+    String(channels),
+    '-i',
+    'pipe:0',
+    '-ac',
+    String(channels),
+    '-ar',
+    String(outputSampleRate),
+    '-f',
+    's16le',
+    'pipe:1',
+  ];
+
+  const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'inherit'] });
+  const chunks: Buffer[] = [];
+  proc.stdout.on('data', (chunk) => chunks.push(chunk as Buffer));
+
+  const completion = new Promise<void>((resolve, reject) => {
+    proc.once('error', (err) => reject(err));
+    proc.once('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`ffmpeg exited with code ${code ?? 'unknown'}`));
+    });
+  });
+
+  proc.stdin?.write(buffer);
+  proc.stdin?.end();
+  await completion;
+  return Buffer.concat(chunks);
 }
 
 export async function transcodeFileToPcmWav(options: {

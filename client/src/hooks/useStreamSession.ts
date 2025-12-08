@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { TranscriptRow, WsPayload } from '../types/app';
+import { STREAM_HEADER_BYTES } from '../utils/streamHeader';
+import type { NormalizedRow, TranscriptRow, WsPayload } from '../types/app';
 import type { RetryController } from './retryController';
 
 interface UseStreamSessionConfig {
@@ -11,10 +12,10 @@ interface UseStreamSessionConfig {
   onSessionClose?: () => void;
 }
 
-const TARGET_SAMPLE_RATE = 16000;
-const HEADER_BYTES = 16; // seq(uint32) + captureTs(float64) + durationMs(float32)
+const DEFAULT_SAMPLE_RATE = 16000;
+const OPENAI_SAMPLE_RATE = 24000;
 
-const buildAudioConstraints = (deviceId?: string): MediaTrackConstraints | boolean => {
+const buildAudioConstraints = (deviceId?: string, sampleRate: number = DEFAULT_SAMPLE_RATE): MediaTrackConstraints | boolean => {
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getSupportedConstraints) {
     return deviceId ? { deviceId: { exact: deviceId } } : true;
   }
@@ -22,7 +23,7 @@ const buildAudioConstraints = (deviceId?: string): MediaTrackConstraints | boole
   const constraints: MediaTrackConstraints = {};
   if (deviceId) constraints.deviceId = { exact: deviceId };
   if (supported.channelCount) constraints.channelCount = 1;
-  if (supported.sampleRate) constraints.sampleRate = 16000;
+  if (supported.sampleRate) constraints.sampleRate = sampleRate;
   if (supported.sampleSize) constraints.sampleSize = 16;
   if (supported.echoCancellation) constraints.echoCancellation = false;
   if (supported.noiseSuppression) constraints.noiseSuppression = false;
@@ -34,6 +35,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   const [transcripts, setTranscripts] = useState<TranscriptRow[]>([]);
   const [latencies, setLatencies] = useState<number[]>([]);
   const [latenciesByProvider, setLatenciesByProvider] = useState<Record<string, number[]>>({});
+  const [normalizedRows, setNormalizedRows] = useState<NormalizedRow[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +44,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   const transcriptIdRef = useRef(0);
   const interimByChannelRef = useRef<Record<string, string | null>>({});
   const lastFinalByChannelRef = useRef<Record<string, string | null>>({});
+  const normalizedWindowRef = useRef<Map<number, Map<string, NormalizedRow>>>(new Map());
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -53,11 +56,14 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   const resetStreamState = useCallback(() => {
     setTranscripts([]);
     setLatencies([]);
+    setLatenciesByProvider({});
+    setNormalizedRows([]);
     setSessionId(null);
     setError(null);
     setWarning(null);
     interimByChannelRef.current = {};
     lastFinalByChannelRef.current = {};
+    normalizedWindowRef.current = new Map();
   }, []);
 
   const stopMedia = useCallback(() => {
@@ -81,6 +87,12 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
     streamingRef.current = false;
   }, []);
 
+  const pickTargetSampleRate = useCallback((providers: string[]): number => {
+    const unique = Array.from(new Set(providers));
+    const onlyOpenAI = unique.length === 1 && unique[0] === 'openai';
+    return onlyOpenAI ? OPENAI_SAMPLE_RATE : DEFAULT_SAMPLE_RATE;
+  }, []);
+
   const attachRealtimeSocketHandlers = useCallback(
     (socket: WebSocket, restart: () => void, onDisconnect?: () => void) => {
       const handleMessage = (event: MessageEvent<string>) => {
@@ -89,6 +101,43 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           if (payload.type === 'session' && payload.sessionId) {
             setSessionId(payload.sessionId);
             retry.reset();
+          } else if (payload.type === 'normalized' && typeof (payload.windowId ?? payload.segmentId) === 'number' && payload.provider) {
+            setNormalizedRows((prev) => {
+              const map = normalizedWindowRef.current;
+              const windowId = payload.windowId ?? payload.segmentId ?? 0;
+              const windowMap = map.get(windowId) ?? new Map<string, NormalizedRow>();
+              const row: NormalizedRow = {
+                normalizedId: payload.normalizedId,
+                segmentId: payload.segmentId ?? windowId,
+                windowId,
+                windowStartMs: payload.windowStartMs ?? windowId * chunkMs,
+                windowEndMs: payload.windowEndMs ?? windowId * chunkMs + chunkMs,
+                provider: payload.provider!,
+                textRaw: payload.textRaw ?? payload.text ?? '',
+                textNorm: payload.textNorm ?? payload.textRaw ?? payload.text ?? '',
+                textDelta: payload.textDelta,
+                isFinal: !!payload.isFinal,
+                revision: payload.revision ?? 1,
+                latencyMs: payload.latencyMs,
+                originCaptureTs: payload.originCaptureTs,
+                confidence: payload.confidence ?? null,
+                punctuationApplied: payload.punctuationApplied ?? null,
+                casingApplied: payload.casingApplied ?? null,
+                words: payload.words,
+              };
+              windowMap.set(payload.provider, row);
+              map.set(windowId, windowMap);
+              if (map.size > 600) {
+                const oldest = Math.min(...map.keys());
+                map.delete(oldest);
+              }
+              const ordered = Array.from(map.entries())
+                .sort((a, b) => a[0] - b[0])
+                .flatMap(([, providers]) =>
+                  Array.from(providers.values()).sort((a, b) => a.provider.localeCompare(b.provider))
+                );
+              return ordered.slice(-500);
+            });
           } else if (payload.type === 'transcript' && payload.text && typeof payload.timestamp === 'number') {
             const channel = ((payload as { channel?: string }).channel ?? 'mic') as 'mic' | 'file';
             const isFinal = !!payload.isFinal;
@@ -193,6 +242,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
             }
           } else if (payload.type === 'error' && payload.message) {
             setError(payload.message);
+            streamingRef.current = false; // avoid auto-retry loops on server-declared fatal errors
+            setIsStreaming(false);
             socket.close();
           }
         } catch (err) {
@@ -242,6 +293,10 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
         setError('プロバイダが選択されていません');
         return;
       }
+      // Tear down any existing session proactively to avoid leaked AudioContexts/WS.
+      wsRef.current?.close();
+      stopMedia();
+
       let degraded = false;
       resetStreamState();
       retry.reset();
@@ -250,12 +305,13 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
       setWarning(null);
 
       try {
-        const audioConstraints = buildAudioConstraints(deviceId);
+        const targetSampleRate = pickTargetSampleRate(providers);
+        const audioConstraints = buildAudioConstraints(deviceId, targetSampleRate);
         const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         streamRef.current = stream;
 
         const settings = stream.getAudioTracks()[0]?.getSettings() ?? {};
-        const badSampleRate = typeof settings.sampleRate === 'number' && settings.sampleRate !== TARGET_SAMPLE_RATE;
+        const badSampleRate = typeof settings.sampleRate === 'number' && settings.sampleRate !== targetSampleRate;
         const badChannels = typeof settings.channelCount === 'number' && settings.channelCount !== 1;
         const dspOn =
           settings.echoCancellation === true || settings.noiseSuppression === true || settings.autoGainControl === true;
@@ -263,32 +319,38 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           stream.getTracks().forEach((t) => t.stop());
           if (!allowDegraded) {
             setError(
-              'マイク設定が仕様と一致しません (16kHz/mono/エフェクトOFF)。ブラウザやOSのマイク設定を確認してください。'
+              `マイク設定が仕様と一致しません (${targetSampleRate / 1000}kHz/mono/エフェクトOFF)。ブラウザやOSのマイク設定を確認してください。`
             );
             setIsStreaming(false);
             return;
           }
           degraded = true;
-          setWarning('品質低下モードで継続します: 16kHz/mono/エフェクトOFF を満たせませんでした。');
+          setWarning(
+            `品質低下モードで継続します: ${targetSampleRate / 1000}kHz/mono/エフェクトOFF を満たせませんでした。`
+          );
           const retryStream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true });
           streamRef.current = retryStream;
         }
 
         const activeStream = streamRef.current ?? stream;
-        const ctxSampleRate = TARGET_SAMPLE_RATE;
-        const context = new AudioContext({ sampleRate: ctxSampleRate, latencyHint: 'interactive' });
+        const requestedSampleRate = targetSampleRate;
+        let context = new AudioContext({ sampleRate: requestedSampleRate, latencyHint: 'interactive' });
         audioContextRef.current = context;
-        if (context.sampleRate !== TARGET_SAMPLE_RATE) {
-          activeStream.getTracks().forEach((t) => t.stop());
-          await context.close();
-          audioContextRef.current = null;
+        if (context.sampleRate !== targetSampleRate) {
           if (!allowDegraded) {
-            setError('AudioContext が 16kHz をサポートしていません (ハードウェア/ブラウザ制限)');
+            activeStream.getTracks().forEach((t) => t.stop());
+            await context.close();
+            audioContextRef.current = null;
+            setError(`AudioContext が ${targetSampleRate / 1000}kHz をサポートしていません (ハードウェア/ブラウザ制限)`);
             setIsStreaming(false);
             return;
           }
           degraded = true;
-          setWarning('品質低下モード: AudioContext が 16kHz ではありません。ブラウザ/デバイスを確認してください。');
+          setWarning(`品質低下モード: AudioContext が ${targetSampleRate / 1000}kHz ではありません。ブラウザ/デバイスを確認してください。`);
+          // Fall back to a hardware-decided rate to keep streaming alive.
+          await context.close();
+          context = new AudioContext({ latencyHint: 'interactive' });
+          audioContextRef.current = context;
         }
 
         const workletUrl = new URL('../audio/pcmWorklet.js', import.meta.url);
@@ -296,7 +358,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
 
         const source = context.createMediaStreamSource(activeStream);
         sourceNodeRef.current = source;
-        const chunkSamples = Math.round((TARGET_SAMPLE_RATE * chunkMs) / 1000);
+        const chunkSamples = Math.round((targetSampleRate * chunkMs) / 1000);
         const worklet = new AudioWorkletNode(context, 'pcm-worklet', {
           numberOfOutputs: 0,
           processorOptions: {
@@ -311,12 +373,12 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           const socket = wsRef.current;
           if (!socket || socket.readyState !== WebSocket.OPEN) return;
           const captureTs = timeBaseMs + payload.endTimeMs;
-          const packet = new ArrayBuffer(HEADER_BYTES + payload.pcm.byteLength);
+          const packet = new ArrayBuffer(STREAM_HEADER_BYTES + payload.pcm.byteLength);
           const view = new DataView(packet);
           view.setUint32(0, payload.seq, true);
           view.setFloat64(4, captureTs, true);
           view.setFloat32(12, payload.durationMs, true);
-          new Uint8Array(packet, HEADER_BYTES).set(new Uint8Array(payload.pcm));
+          new Uint8Array(packet, STREAM_HEADER_BYTES).set(new Uint8Array(payload.pcm));
           socket.send(packet);
         };
 
@@ -338,7 +400,14 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
 
         socket.addEventListener('open', () => {
           if (wsRef.current !== socket) return;
-          socket.send(JSON.stringify({ ...buildStreamingConfig(), pcm: true, degraded }));
+          socket.send(
+            JSON.stringify({
+              ...buildStreamingConfig(),
+              pcm: true,
+              degraded,
+              clientSampleRate: context.sampleRate,
+            })
+          );
           source.connect(worklet);
           // keep graph silent: no destination connection
           void context.resume();
@@ -360,7 +429,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
   );
 
   const startReplay = useCallback(
-    async (file: File, options: { provider: string; lang: string }) => {
+    async (file: File, options: { providers: string[]; lang: string }) => {
       if (!file) {
         setError('再生する音声ファイルが指定されていません');
         return;
@@ -374,15 +443,19 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
       try {
         const form = new FormData();
         form.append('file', file, file.name);
-        form.append('provider', options.provider);
+        if (options.providers.length > 1) {
+          form.append('providers', options.providers.join(','));
+        } else {
+          form.append('provider', options.providers[0]);
+        }
         form.append('lang', options.lang);
 
         const response = await fetch(`${apiBase}/api/realtime/replay`, { method: 'POST', body: form });
         if (!response.ok) {
           const text = await response.text();
           try {
-            const parsed = JSON.parse(text);
-            const detail = (parsed as any)?.detail ?? (parsed as any)?.message;
+            const parsed = JSON.parse(text) as { detail?: string; message?: string };
+            const detail = parsed?.detail ?? parsed?.message;
             throw new Error(detail ?? '内部再生セッションの開始に失敗しました');
           } catch {
             throw new Error('内部再生セッションの開始に失敗しました');
@@ -390,7 +463,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
         }
 
         const data = (await response.json()) as { sessionId: string };
-        const socket = new WebSocket(buildWsUrl('replay', [options.provider], data.sessionId));
+        const path = options.providers.length > 1 ? 'replay-multi' : 'replay';
+        const socket = new WebSocket(buildWsUrl(path, options.providers, data.sessionId));
         wsRef.current = socket;
 
         const cleanup = () => {
@@ -428,6 +502,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
     transcripts,
     latencies,
     latenciesByProvider,
+    normalizedRows,
     isStreaming,
     error,
     warning,

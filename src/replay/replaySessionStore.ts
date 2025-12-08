@@ -9,7 +9,7 @@ type StoredSession = {
   id: string;
   filePath: string;
   originalName: string;
-  provider: ProviderId;
+  providers: ProviderId[];
   lang: string;
   createdAt: string;
   used: boolean;
@@ -19,7 +19,7 @@ type StoredSession = {
 export class ReplaySessionStore {
   private sessions = new Map<string, StoredSession>();
 
-  create(file: Express.Multer.File, provider: ProviderId, lang: string) {
+  create(file: Express.Multer.File, providers: ProviderId[], lang: string) {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     const timer = setTimeout(() => {
@@ -30,7 +30,7 @@ export class ReplaySessionStore {
       id,
       filePath: file.path,
       originalName: file.originalname,
-      provider,
+      providers: Array.from(new Set(providers)),
       lang,
       createdAt,
       used: false,

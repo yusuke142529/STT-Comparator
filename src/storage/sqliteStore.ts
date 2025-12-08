@@ -45,6 +45,7 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
           latencyMs INTEGER,
           vendorProcessingMs INTEGER,
           degraded INTEGER,
+          normalization TEXT,
           text TEXT,
           refText TEXT,
           opts TEXT,
@@ -67,6 +68,10 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
     if (!hasDegraded) {
       this.db.prepare(`ALTER TABLE results ADD COLUMN degraded INTEGER`).run();
     }
+    const hasNormalization = jobColumns.some((row) => row.name === 'normalization');
+    if (!hasNormalization) {
+      this.db.prepare(`ALTER TABLE results ADD COLUMN normalization TEXT`).run();
+    }
 
     const createdAtColumns = this.db.prepare(`PRAGMA table_info('results')`).all() as Database.ColumnDefinition[];
     const hasCreatedAt = createdAtColumns.some((row) => row.name === 'createdAt');
@@ -80,12 +85,13 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
     if (!this.db) throw new Error('SQLite store not initialized');
     this.db
       .prepare(
-        `INSERT INTO results (jobId, path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, vendorProcessingMs, degraded, text, refText, opts, createdAt)
-         VALUES (@jobId, @path, @provider, @lang, @durationSec, @processingTimeMs, @rtf, @cer, @wer, @latencyMs, @vendorProcessingMs, @degraded, @text, @refText, @opts, @createdAt)`
+        `INSERT INTO results (jobId, path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, vendorProcessingMs, degraded, normalization, text, refText, opts, createdAt)
+         VALUES (@jobId, @path, @provider, @lang, @durationSec, @processingTimeMs, @rtf, @cer, @wer, @latencyMs, @vendorProcessingMs, @degraded, @normalization, @text, @refText, @opts, @createdAt)`
       )
       .run({
         ...record,
         opts: record.opts ? JSON.stringify(record.opts) : null,
+        normalization: record.normalizationUsed ? JSON.stringify(record.normalizationUsed) : null,
         createdAt: record.createdAt ?? new Date().toISOString(),
       });
 
@@ -94,36 +100,48 @@ export class SqliteStore implements StorageDriver<BatchJobFileResult> {
 
   async readAll(): Promise<BatchJobFileResult[]> {
     if (!this.db) throw new Error('SQLite store not initialized');
-    const rows = this.db.prepare('SELECT * FROM results ORDER BY id DESC').all() as (BatchJobFileResult & { opts: string | null })[];
-    return rows.map((row) => ({
-      ...row,
-      degraded: row.degraded == null ? undefined : Boolean(row.degraded),
-      opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
-    }));
+    const rows = this.db.prepare('SELECT * FROM results ORDER BY id DESC').all() as (BatchJobFileResult & { opts: string | null; normalization?: string | null })[];
+    return rows.map((row) => {
+      const { normalization, ...rest } = row;
+      return {
+        ...rest,
+        degraded: row.degraded == null ? undefined : Boolean(row.degraded),
+        opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
+        normalizationUsed: normalization ? (JSON.parse(normalization) as any) : undefined,
+      };
+    });
   }
 
   async readRecent(limit: number): Promise<BatchJobFileResult[]> {
     if (!this.db) throw new Error('SQLite store not initialized');
     const rows = this.db
       .prepare('SELECT * FROM results ORDER BY id DESC LIMIT ?')
-      .all(limit) as (BatchJobFileResult & { opts: string | null })[];
-    return rows.map((row) => ({
-      ...row,
-      degraded: row.degraded == null ? undefined : Boolean(row.degraded),
-      opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
-    }));
+      .all(limit) as (BatchJobFileResult & { opts: string | null; normalization?: string | null })[];
+    return rows.map((row) => {
+      const { normalization, ...rest } = row;
+      return {
+        ...rest,
+        degraded: row.degraded == null ? undefined : Boolean(row.degraded),
+        opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
+        normalizationUsed: normalization ? (JSON.parse(normalization) as any) : undefined,
+      };
+    });
   }
 
   async readByJob(jobId: string): Promise<BatchJobFileResult[]> {
     if (!this.db) throw new Error('SQLite store not initialized');
     const rows = this.db
       .prepare('SELECT * FROM results WHERE jobId = ? ORDER BY id DESC')
-      .all(jobId) as (BatchJobFileResult & { opts: string | null })[];
-    return rows.map((row) => ({
-      ...row,
-      degraded: row.degraded == null ? undefined : Boolean(row.degraded),
-      opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
-    }));
+      .all(jobId) as (BatchJobFileResult & { opts: string | null; normalization?: string | null })[];
+    return rows.map((row) => {
+      const { normalization, ...rest } = row;
+      return {
+        ...rest,
+        degraded: row.degraded == null ? undefined : Boolean(row.degraded),
+        opts: row.opts ? (JSON.parse(row.opts) as Record<string, unknown>) : undefined,
+        normalizationUsed: normalization ? (JSON.parse(normalization) as any) : undefined,
+      };
+    });
   }
 
   private async maybePrune(): Promise<void> {

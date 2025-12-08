@@ -3,10 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { getAdapter } from '../adapters/index.js';
 import { logger } from '../logger.js';
-import { spawnPcmTranscoder } from '../utils/ffmpeg.js';
+import { createPcmResampler, spawnPcmTranscoder } from '../utils/ffmpeg.js';
 import { bufferToArrayBuffer } from '../utils/buffer.js';
 import { persistLatency } from '../utils/latency.js';
 import { streamingConfigMessageSchema } from '../validation.js';
+import { StreamNormalizer } from './streamNormalizer.js';
+import { parseStreamFrame } from '../utils/streamHeader.js';
+import {
+  getProviderSampleRate,
+  isPerProviderTranscodeEnabled,
+  requiresHighQualityTranscode,
+} from '../utils/providerAudio.js';
 import type {
   ProviderId,
   RealtimeLatencySummary,
@@ -18,10 +25,9 @@ import type {
   StreamTranscriptMessage,
   StorageDriver,
   StreamingController,
+  NormalizedTranscriptMessage,
 } from '../types.js';
 import type { RealtimeTranscriptLogWriter } from '../storage/realtimeTranscriptStore.js';
-
-const HEADER_BYTES = 16; // seq(uint32) + captureTs(float64) + durationMs(float32)
 
 type ProviderSession = {
   controller: StreamingController;
@@ -37,8 +43,12 @@ type ProviderSession = {
   lastCaptureTs: number | null;
   closed: boolean;
   cleanupPromise?: Promise<void>;
-  captureTsQueue: Array<number | undefined>;
+  captureTsQueue: Array<{ captureTs: number; durationMs: number; seq: number }>;
   droppedMs: number;
+  lastAttributed?: { nextTs: number; durationMs: number };
+  inputSampleRate?: number;
+  resampler?: ReturnType<typeof createPcmResampler> | null;
+  perProviderTranscode: boolean;
 };
 
 export async function handleCompareStreamConnection(
@@ -50,9 +60,10 @@ export async function handleCompareStreamConnection(
 ) {
   const config = await loadConfig();
   const adapters = providers.map((id) => ({ id, adapter: getAdapter(id) }));
+  const perProviderTranscode = isPerProviderTranscodeEnabled();
 
   let transcoder: ReturnType<typeof spawnPcmTranscoder> | null = null;
-  const pcmQueue: Array<{ chunk: Buffer; captureTs?: number }> = [];
+  const pcmQueue: Array<{ chunk: Buffer; meta?: { captureTs: number; durationMs: number; seq: number } }> = [];
   let queuedBytes = 0;
   let sessionStarted = false;
   const sessions = new Map<ProviderId, ProviderSession>();
@@ -67,6 +78,8 @@ export async function handleCompareStreamConnection(
   let closed = false;
   let expectsPcm = false;
   let sessionDegraded = false;
+  let normalizer: StreamNormalizer | null = null;
+  let clientSampleRate = config.audio.targetSampleRate;
   let closeResolve: (() => void) | null = null;
   const closePromise = new Promise<void>((resolve) => {
     closeResolve = resolve;
@@ -121,7 +134,7 @@ export async function handleCompareStreamConnection(
   };
 
   function sendJson(
-    payload: StreamTranscriptMessage | StreamErrorMessage | StreamSessionMessage,
+    payload: StreamTranscriptMessage | NormalizedTranscriptMessage | StreamErrorMessage | StreamSessionMessage,
     provider: ProviderId | null = null
   ) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -162,17 +175,60 @@ export async function handleCompareStreamConnection(
     }
   };
 
+  const deliverChunk = (
+    provider: ProviderId,
+    session: ProviderSession,
+    chunk: Buffer,
+    meta?: { captureTs?: number; durationMs?: number; seq?: number }
+  ) => {
+    if (session.failed) return;
+    const now = Date.now();
+    const captureTs = meta?.captureTs ?? session.lastCaptureTs ?? now;
+    const durationMs = meta?.durationMs ?? chunkDurationMs;
+    const seq = meta?.seq ?? 0;
+
+    if (typeof captureTs === 'number') {
+      session.lastCaptureTs = captureTs;
+      if (!session.firstCaptureTs) session.firstCaptureTs = captureTs;
+    }
+    if (!session.firstSentAt) session.firstSentAt = now;
+    session.lastSentAt = now;
+
+    session.captureTsQueue.push({
+      captureTs,
+      durationMs,
+      seq,
+    });
+
+    session.pendingCount += 1;
+    const sendPromise = (session.pending ?? Promise.resolve())
+      .then(() => session.controller.sendAudio(bufferToArrayBuffer(chunk), { captureTs }))
+      .catch((err) => {
+        markProviderFailed(provider, err as Error);
+      })
+      .finally(() => {
+        session.pendingCount -= 1;
+        if (session.pendingCount < backlogSoft) {
+          session.droppedMs = 0;
+        }
+      });
+    session.pending = sendPromise;
+  };
+
   async function flushQueue() {
     if (sessions.size === 0) return;
     while (pcmQueue.length > 0) {
       const entry = pcmQueue.shift();
       if (!entry) break;
       queuedBytes -= entry.chunk.length;
-      await fanoutChunk(entry.chunk, entry.captureTs);
+      await fanoutChunk(entry.chunk, entry.meta);
     }
   }
 
-  const fanoutChunk = async (chunk: Buffer, captureTs?: number) => {
+  const fanoutChunk = async (
+    chunk: Buffer,
+    meta?: { captureTs: number; durationMs: number; seq: number }
+  ) => {
     if (sessions.size === 0) return;
     const now = Date.now();
     for (const [provider, session] of sessions.entries()) {
@@ -188,45 +244,41 @@ export async function handleCompareStreamConnection(
         }
         continue;
       }
-      if (typeof captureTs === 'number') {
-        session.lastCaptureTs = captureTs;
-        if (!session.firstCaptureTs) session.firstCaptureTs = captureTs;
+      const durationMs = meta?.durationMs ?? chunkDurationMs;
+      const seq = meta?.seq ?? 0;
+      const captureTs = meta?.captureTs ?? session.lastCaptureTs ?? now;
+      const useResampler = expectsPcm && session.perProviderTranscode && session.resampler;
+      const resamplerOutputRate = session.resampler?.outputSampleRate;
+      if (useResampler && resamplerOutputRate && resamplerOutputRate !== clientSampleRate) {
+        await session.resampler.input(chunk, { captureTs, durationMs, seq });
+      } else {
+        deliverChunk(provider, session, chunk, { captureTs, durationMs, seq });
       }
-      if (!session.firstSentAt) session.firstSentAt = now;
-      session.lastSentAt = now;
-      session.pendingCount += 1;
-      session.captureTsQueue.push(captureTs);
-      const sendPromise = (session.pending ?? Promise.resolve())
-        .then(() => session.controller.sendAudio(bufferToArrayBuffer(chunk), { captureTs }))
-        .catch((err) => {
-          markProviderFailed(provider, err as Error);
-        })
-        .finally(() => {
-          session.pendingCount -= 1;
-          if (session.pendingCount < backlogSoft) {
-            session.droppedMs = 0;
-          }
-        });
-      session.pending = sendPromise;
     }
   };
 
-  const flushChunk = async (chunk: Buffer, captureTs?: number) => {
+  const flushChunk = async (
+    chunk: Buffer,
+    meta?: { captureTs: number; durationMs: number; seq: number }
+  ) => {
     if (sessions.size === 0) {
-      pcmQueue.push({ chunk, captureTs });
+      pcmQueue.push({ chunk, meta });
       queuedBytes += chunk.length;
       if (queuedBytes > maxQueueBytes) {
         handleFatal(new Error('audio buffer limit exceeded'));
       }
       return;
     }
-    await fanoutChunk(chunk, captureTs);
+    await fanoutChunk(chunk, meta);
   };
 
   function handleFatal(err: Error) {
     if (closed) return;
     closed = true;
     sendJson({ type: 'error', message: err.message } as StreamErrorMessage);
+    for (const session of sessions.values()) {
+      session.resampler?.end();
+    }
     transcoder?.end();
     ws.close();
   }
@@ -247,12 +299,33 @@ export async function handleCompareStreamConnection(
           sessionStarted = true;
           expectsPcm = !!configMsg.pcm;
           sessionDegraded = !!configMsg.degraded;
+          normalizer = new StreamNormalizer({
+            bucketMs: config.audio.chunkMs ?? 250,
+            preset: configMsg.normalizePreset,
+            sessionId,
+          });
+          clientSampleRate = configMsg.clientSampleRate ?? config.audio.targetSampleRate;
 
           await Promise.all(
             adapters.map(async ({ id, adapter }) => {
+              const providerSampleRate = getProviderSampleRate(id, config);
+              const forcedPerProviderTranscode = requiresHighQualityTranscode(id);
+              const providerPerProviderTranscode = perProviderTranscode || forcedPerProviderTranscode;
+              const effectiveSampleRate = providerPerProviderTranscode ? providerSampleRate : clientSampleRate;
+
+              logger.info({
+                event: 'compare_stream_start',
+                provider: id,
+                lang,
+                clientSampleRate,
+                effectiveSampleRate,
+                perProviderTranscode: providerPerProviderTranscode,
+                forcedPerProviderTranscode,
+              });
+
               const streamingSession = await adapter.startStreaming({
                 language: lang,
-                sampleRateHz: config.audio.targetSampleRate,
+                sampleRateHz: effectiveSampleRate,
                 encoding: 'linear16',
                 enableInterim: configMsg.enableInterim,
                 contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
@@ -276,19 +349,59 @@ export async function handleCompareStreamConnection(
                 closed: false,
                 captureTsQueue: [],
                 droppedMs: 0,
+                lastAttributed: undefined,
+                inputSampleRate: clientSampleRate,
+                resampler: expectsPcm && providerPerProviderTranscode
+                  ? createPcmResampler({
+                      inputSampleRate: clientSampleRate,
+                      outputSampleRate: providerSampleRate,
+                      channels: config.audio.targetChannels,
+                    })
+                  : null,
+                perProviderTranscode: providerPerProviderTranscode,
               };
+
+              providerSession.resampler?.onChunk((chunk, meta) => {
+                deliverChunk(id, providerSession, chunk, meta);
+              });
+              providerSession.resampler?.onError((err) => markProviderFailed(id, err));
+              providerSession.resampler?.onClose((code) => {
+                if (closed) return;
+                if (typeof code === 'number' && code !== 0) {
+                  markProviderFailed(id, new Error(`ffmpeg exited with code ${code}`));
+                }
+              });
               sessions.set(id, providerSession);
 
               streamingSession.onData((transcript) => {
                 const session = sessions.get(id);
                 if (!session || session.failed) return;
-                const originCaptureTs =
+                const attribution =
                   session.captureTsQueue.shift() ??
+                  (session.lastAttributed
+                    ? {
+                        captureTs: session.lastAttributed.nextTs,
+                        durationMs: session.lastAttributed.durationMs,
+                        seq: 0,
+                      }
+                    : null);
+
+                if (attribution) {
+                  session.lastAttributed = {
+                    nextTs: attribution.captureTs + attribution.durationMs,
+                    durationMs: attribution.durationMs,
+                  };
+                }
+
+                const originCaptureTs =
+                  attribution?.captureTs ??
                   session.lastCaptureTs ??
                   session.firstCaptureTs ??
                   session.lastSentAt ??
-                  session.firstSentAt;
-                const latencyMs = typeof originCaptureTs === 'number' ? Date.now() - originCaptureTs : 0;
+                  session.firstSentAt ??
+                  Date.now();
+
+                const latencyMs = Date.now() - originCaptureTs;
                 const payload: StreamTranscriptMessage = {
                   type: 'transcript',
                   ...transcript,
@@ -300,7 +413,24 @@ export async function handleCompareStreamConnection(
                 };
                 if (!shouldEmitTranscript(id, payload)) return;
                 if (typeof latencyMs === 'number') providerSession.latencies.push(latencyMs);
+                const normalized = normalizer?.ingest(id, {
+                  provider: id,
+                  isFinal: payload.isFinal,
+                  text: payload.text,
+                  words: payload.words,
+                  timestamp: payload.originCaptureTs ?? payload.timestamp ?? Date.now(),
+                  channel: payload.channel,
+                  latencyMs: payload.latencyMs,
+                  originCaptureTs: payload.originCaptureTs,
+                  confidence: payload.confidence,
+                  punctuationApplied: payload.punctuationApplied,
+                  casingApplied: payload.casingApplied,
+                });
                 sendJson(payload, id);
+                if (normalized) {
+                  const normalizedMsg: NormalizedTranscriptMessage = { type: 'normalized', ...normalized };
+                  sendJson(normalizedMsg, id);
+                }
               });
 
               streamingSession.onError((err) => {
@@ -311,7 +441,17 @@ export async function handleCompareStreamConnection(
                 markProviderFailed(id, new Error('stream closed'));
               });
 
-              sendJson({ type: 'session', sessionId, provider: id, startedAt } as StreamSessionMessage, id);
+              sendJson(
+                {
+                  type: 'session',
+                  sessionId,
+                  provider: id,
+                  startedAt,
+                  inputSampleRate: clientSampleRate,
+                  audioSpec: { sampleRate: providerSampleRate, channels: 1, format: 'pcm16le' },
+                } as StreamSessionMessage,
+                id
+              );
             })
           );
 
@@ -329,15 +469,17 @@ export async function handleCompareStreamConnection(
       if (isBinary) {
         const buffer = normalizeRawData(data);
         if (expectsPcm) {
-          if (buffer.length <= HEADER_BYTES) {
-            return handleFatal(new Error('invalid pcm frame'));
+          try {
+            const { header, pcm } = parseStreamFrame(buffer);
+            await flushChunk(pcm, {
+              captureTs: header.captureTs,
+              durationMs: header.durationMs || chunkDurationMs,
+              seq: header.seq,
+            });
+            return;
+          } catch (err) {
+            return handleFatal(err as Error);
           }
-          const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-          const captureTs = view.getFloat64(4, true);
-          const pcmStart = HEADER_BYTES;
-          const pcmChunk = buffer.subarray(pcmStart);
-          await flushChunk(pcmChunk, captureTs);
-          return;
         }
         const activeTranscoder = ensureTranscoder();
         await activeTranscoder?.input(buffer);
@@ -351,6 +493,7 @@ export async function handleCompareStreamConnection(
       try {
         transcoder?.end();
         for (const [provider, session] of sessions.entries()) {
+          session.resampler?.end();
           if (!session.closed) {
             closeSession(provider, session);
           }

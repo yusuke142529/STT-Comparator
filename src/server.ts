@@ -11,7 +11,7 @@ import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { handleStreamConnection } from './ws/streamHandler.js';
 import { handleCompareStreamConnection } from './ws/compareStreamHandler.js';
-import { handleReplayConnection } from './ws/replayHandler.js';
+import { handleReplayConnection, handleReplayMultiConnection } from './ws/replayHandler.js';
 import { logger } from './logger.js';
 import { createRealtimeStorage, createRealtimeTranscriptStore, createStorage } from './storage/index.js';
 import { loadConfig, reloadConfig } from './config.js';
@@ -501,10 +501,11 @@ async function bootstrap() {
   app.post('/api/realtime/replay', upload.single('file'), async (req, res, next) => {
     try {
       const providerAvailability = await providerStatusCache.get();
-      const provider = req.body.provider as ProviderId;
+      const provider = req.body.provider as ProviderId | undefined;
+      const providersRaw = req.body.providers as string | string[] | undefined;
       const lang = (req.body.lang as string) ?? '';
-      if (!provider || !lang) {
-        throw new HttpError(400, 'provider and lang are required for replay');
+      if ((!provider && !providersRaw) || !lang) {
+        throw new HttpError(400, 'provider/providers and lang are required for replay');
       }
       if (!req.file) {
         throw new HttpError(400, 'audio file is required for replay');
@@ -512,23 +513,55 @@ async function bootstrap() {
       if (!req.file.size || req.file.size === 0) {
         throw new HttpError(400, 'audio file is empty');
       }
-      const providerLimit = getBatchMaxBytes(provider, config);
+      const providers = (() => {
+        if (providersRaw) {
+          try {
+            const parsed = Array.isArray(providersRaw)
+              ? providersRaw
+              : (() => {
+                  const raw = providersRaw as string;
+                  if (raw.trim().startsWith('[')) return JSON.parse(raw) as unknown;
+                  return raw.split(',').map((v) => v.trim()).filter(Boolean);
+                })();
+            if (!Array.isArray(parsed) || parsed.length === 0) {
+              throw new Error('providers must be a non-empty array');
+            }
+            return Array.from(new Set(parsed)) as ProviderId[];
+          } catch (err) {
+            throw new HttpError(400, `invalid providers: ${(err as Error).message}`);
+          }
+        }
+        if (provider) return [provider];
+        return [];
+      })();
+
+      if (providers.length === 0) {
+        throw new HttpError(400, 'providers must not be empty');
+      }
+
+      const providerLimit = providers
+        .map((p) => getBatchMaxBytes(p, config))
+        .filter((v): v is number => typeof v === 'number')
+        .sort((a, b) => a - b)[0];
       if (providerLimit && req.file.size > providerLimit) {
-        throw new HttpError(413, `audio file too large for provider (${Math.round(providerLimit / (1024 * 1024))}MB limit)`);
+        throw new HttpError(
+          413,
+          `audio file too large for provider (${Math.round(providerLimit / (1024 * 1024))}MB limit)`
+        );
       }
       // Guard extremely long inputs that can hang realtime sockets
       const maxBytes = 1024 * 1024 * 200; // ~200MB raw wav upper bound (~20+ minutes 16k mono)
       if (req.file.size > maxBytes) {
         throw new HttpError(413, 'audio file too large for realtime replay');
       }
-      requireProviderAvailable(providerAvailability, provider, 'streaming');
+      providers.forEach((p) => requireProviderAvailable(providerAvailability, p, 'streaming'));
       const normalization = await ensureNormalizedAudio(req.file.path, { config, allowCache: false, allowFallback: true });
       const normalizedFile = {
         ...req.file,
         path: normalization.normalizedPath,
         size: normalization.bytes,
       };
-      const session = replaySessionStore.create(normalizedFile, provider, lang);
+      const session = replaySessionStore.create(normalizedFile, providers, lang);
       res.json({
         sessionId: session.id,
         filename: session.originalName,
@@ -671,7 +704,8 @@ async function bootstrap() {
 
   replayWss.on('connection', (ws, req) => {
     const url = new URL(req.url ?? '', 'http://localhost');
-    const provider = url.searchParams.get('provider') as ProviderId;
+    const provider = url.searchParams.get('provider') as ProviderId | null;
+    const providersParam = url.searchParams.get('providers');
     const lang = url.searchParams.get('lang') ?? 'ja-JP';
     const sessionId = url.searchParams.get('sessionId');
     const origin = req.headers.origin;
@@ -688,28 +722,53 @@ async function bootstrap() {
       sendWsError('origin not allowed');
       return;
     }
-    if (!provider) {
-      sendWsError('provider query param is required');
-      return;
-    }
     if (!sessionId) {
       sendWsError('sessionId query param is required');
       return;
     }
 
+    const providers = (() => {
+      if (providersParam) {
+        return providersParam
+          .split(',')
+          .map((p) => p.trim())
+          .filter(Boolean) as ProviderId[];
+      }
+      return provider ? [provider] : [];
+    })();
+
+    if (providers.length === 0) {
+      sendWsError('provider or providers query param is required');
+      return;
+    }
+
+    const isMulti = providers.length >= 2;
+
     (async () => {
       const providerAvailability = await providerStatusCache.get();
       try {
-        requireProviderAvailable(providerAvailability, provider, 'streaming');
-        await handleReplayConnection(
-          ws,
-          provider,
-          lang,
-          sessionId,
-          replaySessionStore,
-          realtimeLatencyStore,
-          realtimeTranscriptLogStore
-        );
+        providers.forEach((p) => requireProviderAvailable(providerAvailability, p, 'streaming'));
+        if (isMulti) {
+          await handleReplayMultiConnection(
+            ws,
+            providers,
+            lang,
+            sessionId,
+            replaySessionStore,
+            realtimeLatencyStore,
+            realtimeTranscriptLogStore
+          );
+        } else {
+          await handleReplayConnection(
+            ws,
+            providers[0],
+            lang,
+            sessionId,
+            replaySessionStore,
+            realtimeLatencyStore,
+            realtimeTranscriptLogStore
+          );
+        }
       } catch (error) {
         logger.error({ event: 'ws_replay_error', message: (error as Error).message });
         sendWsError((error as Error).message ?? 'replay handler error');

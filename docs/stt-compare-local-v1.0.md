@@ -52,6 +52,7 @@
 ## 4. 前提・制約
 - ローカル起動: Web UI とローカルサーバ（Node.js）は利用者マシン上で動作。外部通信は各ASRプロバイダのAPIエンドポイントまたはローカルASRサーバ（local_whisper, nvidia_riva等）のみ。
 - 同一PCM条件での比較（16kHz, 16-bit, mono 推奨）。
+- 評価時の正規化は NFKC + 句読点除去を基本とし、単語境界の公平性を保つため空白は保持する（stripSpace=false がデフォルト）。
 - ブラウザ音声取得は MediaRecorder（audio/webm; codecs=opus）→ ローカルサーバで PCM 変換。
 - サポートブラウザ: Chrome / Edge 最新版。Safari 等は v1.0 では対象外。
 - OS: Windows / macOS / Linux（Node.js v20+ / FFmpeg が必要）。

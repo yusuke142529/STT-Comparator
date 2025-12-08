@@ -9,6 +9,26 @@ export interface TranscriptRow {
   degraded?: boolean;
 }
 
+export interface NormalizedRow {
+  normalizedId?: string;
+  segmentId?: number;
+  windowId: number;
+  windowStartMs: number;
+  windowEndMs: number;
+  provider: string;
+  textRaw: string;
+  textNorm: string;
+  textDelta?: string;
+  isFinal: boolean;
+  revision: number;
+  latencyMs?: number;
+  originCaptureTs?: number;
+  confidence?: number | null;
+  punctuationApplied?: boolean | null;
+  casingApplied?: boolean | null;
+  words?: TranscriptWord[];
+}
+
 export interface TranscriptWord {
   startSec: number;
   endSec: number;
@@ -35,6 +55,13 @@ export interface JobSummary {
   wer: SummaryStats;
   rtf: SummaryStats;
   latencyMs: SummaryStats;
+}
+
+export interface NormalizationConfig {
+  nfkc?: boolean;
+  stripPunct?: boolean;
+  stripSpace?: boolean;
+  lowercase?: boolean;
 }
 
 export interface JobHistoryEntry {
@@ -71,6 +98,7 @@ export interface FileResult {
   durationSec?: number | null;
   degraded?: boolean;
   text?: string;
+  normalizationUsed?: NormalizationConfig;
 }
 
 export interface RealtimeLatencySummary {
@@ -87,13 +115,15 @@ export interface RealtimeLatencySummary {
   endedAt: string;
 }
 
-export type RealtimeLogPayloadType = 'session' | 'transcript' | 'error' | 'session_end';
+export type RealtimeLogPayloadType = 'session' | 'transcript' | 'normalized' | 'error' | 'session_end';
 
 export interface RealtimeLogPayloadSession {
   type: 'session';
   sessionId: string;
   provider: string;
   startedAt: string;
+  inputSampleRate?: number;
+  audioSpec?: { sampleRate: number; channels: number; format: string };
 }
 
 export interface RealtimeLogPayloadTranscript {
@@ -105,6 +135,7 @@ export interface RealtimeLogPayloadTranscript {
   channel: 'mic' | 'file';
   latencyMs?: number;
   words?: TranscriptWord[];
+  confidence?: number;
 }
 
 export interface RealtimeLogPayloadError {
@@ -122,7 +153,8 @@ export type RealtimeLogPayload =
   | RealtimeLogPayloadSession
   | RealtimeLogPayloadTranscript
   | RealtimeLogPayloadError
-  | RealtimeLogPayloadSessionEnd;
+  | RealtimeLogPayloadSessionEnd
+  | (NormalizedRow & { type: 'normalized' });
 
 export interface RealtimeLogEntry {
   sessionId: string;
@@ -142,7 +174,7 @@ export interface RealtimeLogSession {
 }
 
 export interface WsPayload {
-  type: 'session' | 'transcript' | 'error';
+  type: 'session' | 'transcript' | 'normalized' | 'error';
   sessionId?: string;
   latencyMs?: number;
   message?: string;
@@ -151,6 +183,20 @@ export interface WsPayload {
   isFinal?: boolean;
   timestamp?: number;
   degraded?: boolean;
+  normalizedId?: string;
+  segmentId?: number;
+  windowId?: number;
+  windowStartMs?: number;
+  windowEndMs?: number;
+  textRaw?: string;
+  textNorm?: string;
+  revision?: number;
+  originCaptureTs?: number;
+  confidence?: number | null;
+  punctuationApplied?: boolean | null;
+  casingApplied?: boolean | null;
+  words?: TranscriptWord[];
+  channel?: 'mic' | 'file';
 }
 
 export type PunctuationPolicy = 'none' | 'basic' | 'full';

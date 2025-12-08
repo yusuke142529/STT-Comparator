@@ -32,6 +32,7 @@ type ProviderState = {
     end: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
   };
+  startOpts?: any;
   setOnData: (cb: (t: any) => void) => void;
   getOnData: () => ((t: any) => void) | null;
   reset: () => void;
@@ -40,11 +41,18 @@ type ProviderState = {
 const state = vi.hoisted(() => {
   const buildProvider = (): ProviderState => {
     let onDataHandler: ((t: any) => void) | null = null;
+    let startOpts: any;
     return {
       controller: {
         sendAudio: vi.fn(async (_chunk?: ArrayBufferLike, _meta?: { captureTs?: number }) => {}),
         end: vi.fn(async () => {}),
         close: vi.fn(async () => {}),
+      },
+      get startOpts() {
+        return startOpts;
+      },
+      set startOpts(opts: any) {
+        startOpts = opts;
       },
       setOnData: (cb: (t: any) => void) => {
         onDataHandler = cb;
@@ -52,6 +60,7 @@ const state = vi.hoisted(() => {
       getOnData: () => onDataHandler,
       reset: () => {
         onDataHandler = null;
+        startOpts = undefined;
       },
     };
   };
@@ -60,6 +69,7 @@ const state = vi.hoisted(() => {
     providers: {
       deepgram: buildProvider(),
       mock: buildProvider(),
+      openai: buildProvider(),
     },
     reset() {
       Object.values(this.providers).forEach((p) => {
@@ -67,6 +77,7 @@ const state = vi.hoisted(() => {
         p.controller.sendAudio.mockClear();
         p.controller.end.mockClear();
         p.controller.close.mockClear();
+        p.startOpts = undefined;
       });
     },
   };
@@ -77,24 +88,27 @@ vi.mock('../config.js', () => ({
     audio: { targetSampleRate: 16000, targetChannels: 1, chunkMs: 250 },
     normalization: {},
     storage: { driver: 'jsonl', path: './runs' },
-    providers: ['mock', 'deepgram'],
+    providers: ['mock', 'deepgram', 'openai'],
     ws: { maxPcmQueueBytes: 1024 * 1024, compare: { backlogSoft: 8, backlogHard: 32, maxDropMs: 1000 } },
   }),
 }));
 
 vi.mock('../adapters/index.js', () => ({
-  getAdapter: vi.fn((id: 'mock' | 'deepgram') => {
+  getAdapter: vi.fn((id: 'mock' | 'deepgram' | 'openai') => {
     const provider = state.providers[id];
     return {
       id,
       supportsStreaming: true,
       supportsBatch: true,
-      startStreaming: vi.fn(async () => ({
-        controller: provider.controller,
-        onData: (cb: (t: any) => void) => provider.setOnData(cb),
-        onError: () => {},
-        onClose: () => {},
-      })),
+      startStreaming: vi.fn(async (opts: any) => {
+        provider.startOpts = opts;
+        return {
+          controller: provider.controller,
+          onData: (cb: (t: any) => void) => provider.setOnData(cb),
+          onError: () => {},
+          onClose: () => {},
+        };
+      }),
       transcribeFileFromPCM: vi.fn(),
     };
   }),
@@ -108,6 +122,21 @@ vi.mock('../utils/ffmpeg.js', () => ({
     onError: vi.fn(),
     onClose: vi.fn(),
   })),
+  createPcmResampler: vi.fn(() => {
+    let onChunk: ((chunk: Buffer, meta: any) => void) | null = null;
+    return {
+      async input(chunk: Buffer, meta: any) {
+        onChunk?.(chunk, meta);
+      },
+      onChunk(cb: (chunk: Buffer, meta: any) => void) {
+        onChunk = cb;
+      },
+      end: vi.fn(),
+      onError: vi.fn(),
+      onClose: vi.fn(),
+      outputSampleRate: 16_000,
+    };
+  }),
 }));
 
 const HEADER_BYTES = 16;
@@ -145,7 +174,11 @@ describe('handleCompareStreamConnection', () => {
 
     await handleCompareStreamConnection(ws as any, ['deepgram', 'mock'], 'ja-JP', noopStore);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
     await flushMicrotasks();
     ws.emit('message', buildPcmFrame(1, Date.now()), true);
 
@@ -174,7 +207,11 @@ describe('handleCompareStreamConnection', () => {
 
     await handleCompareStreamConnection(ws as any, ['deepgram', 'mock'], 'ja-JP', noopStore);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
     await flushMicrotasks();
     ws.emit('message', buildPcmFrame(1, Date.now()), true);
     ws.emit('message', buildPcmFrame(2, Date.now()), true);
@@ -198,7 +235,11 @@ describe('handleCompareStreamConnection', () => {
 
     await handleCompareStreamConnection(ws as any, ['mock', 'deepgram'], 'ja-JP', noopStore, logStore);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
     await flushMicrotasks();
     ws.close();
     await flushMicrotasks();
@@ -231,7 +272,11 @@ describe('handleCompareStreamConnection', () => {
 
     await handleCompareStreamConnection(ws as any, ['mock', 'deepgram'], 'ja-JP', noopStore);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
     await flushMicrotasks();
 
     const captureEarly = Date.now() - 100;
@@ -281,7 +326,11 @@ describe('handleCompareStreamConnection', () => {
 
     await handleCompareStreamConnection(ws as any, ['deepgram', 'mock'], 'ja-JP', noopStore);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
     await flushMicrotasks();
     ws.emit('message', buildPcmFrame(1, Date.now()), true);
     await flushMicrotasks();
@@ -322,7 +371,11 @@ describe('handleCompareStreamConnection', () => {
 
     await handleCompareStreamConnection(ws as any, ['mock', 'deepgram'], 'ja-JP', store);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
     await flushMicrotasks();
     const captureTs = Date.now() - 50;
     ws.emit('message', buildPcmFrame(1, captureTs), true);
@@ -355,5 +408,21 @@ describe('handleCompareStreamConnection', () => {
 
     const appended = (store.append as ReturnType<typeof vi.fn>).mock.calls.map(([v]) => v as RealtimeLatencySummary);
     expect(appended.length === 0 || appended.some((r) => r.provider === 'mock')).toBe(true);
+  });
+
+  it('applies per-provider sample rates when OpenAI and Deepgram are selected', async () => {
+    const { handleCompareStreamConnection } = await import('./compareStreamHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleCompareStreamConnection(ws as any, ['openai', 'deepgram'], 'ja-JP', noopStore);
+
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
+
+    expect(state.providers.openai.startOpts?.sampleRateHz).toBe(24_000);
+    expect(state.providers.deepgram.startOpts?.sampleRateHz).toBe(16_000);
   });
 });

@@ -10,11 +10,15 @@ vi.mock('ws', () => {
     url: string;
     sent: Array<string | Buffer> = [];
     readyState = 0;
+    static OPEN = 1;
     constructor(url: string) {
       super();
       this.url = url;
       wsState.instances.push(this);
-      queueMicrotask(() => this.emit('open'));
+      queueMicrotask(() => {
+        this.readyState = FakeWebSocket.OPEN;
+        this.emit('open');
+      });
     }
     send(data: string | Buffer) {
       this.sent.push(data);
@@ -36,7 +40,7 @@ describe('OpenAIAdapter streaming', () => {
     wsState.instances.length = 0;
   });
 
-  it('sends transcription_session.update and base64 audio, emits transcripts', async () => {
+  it('sends session.update with transcription audio config and base64 audio, emits transcripts', async () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({
       language: 'en',
@@ -52,9 +56,8 @@ describe('OpenAIAdapter streaming', () => {
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
     expect(parsed.type).toBe('transcription_session.update');
-    expect(parsed.session.input_audio_format).toBe('pcm16');
-    expect(parsed.session.input_audio_sample_rate).toBe(24000);
-    expect(parsed.session.input_audio_transcription.language).toBe('en');
+    expect(parsed.session?.input_audio_format).toBe('pcm16');
+    expect(parsed.session?.input_audio_transcription?.language).toBe('en');
 
     const transcripts: string[] = [];
     session.onData((t) => transcripts.push(`${t.isFinal ? 'F' : 'I'}:${t.text}`));
@@ -73,20 +76,30 @@ describe('OpenAIAdapter streaming', () => {
       'message',
       JSON.stringify({
         type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'item-1',
         delta: { transcript: 'hello' },
       })
     );
     ws.emit(
       'message',
       JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'item-1',
+        delta: { transcript: ' world' },
+      })
+    );
+    ws.emit(
+      'message',
+      JSON.stringify({
         type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-1',
         delta: { transcript: 'hello world' },
         words: [{ text: 'hello', start: 0, end: 0.5 }],
       })
     );
 
     await new Promise((r) => setTimeout(r, 5));
-    expect(transcripts).toEqual(['I:hello', 'F:hello world']);
+    expect(transcripts).toEqual(['I:hello', 'I:hello world', 'F:hello world']);
   });
 
   it('normalizes BCP-47 language to ISO code', async () => {
@@ -101,7 +114,8 @@ describe('OpenAIAdapter streaming', () => {
     await new Promise((r) => setTimeout(r, 10));
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
-    expect(parsed.session.input_audio_transcription.language).toBe('ja');
+    expect(parsed.type).toBe('transcription_session.update');
+    expect(parsed.session?.input_audio_transcription?.language).toBe('ja');
   });
 
   it('commits remaining buffered audio on end even when shorter than min buffer', async () => {

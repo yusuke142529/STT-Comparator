@@ -15,11 +15,23 @@ export const PROVIDER_IDS = [
 
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
+export interface EffectiveAudioSpec {
+  sampleRate: number;
+  channels: 1;
+  format: 'pcm16le';
+}
+
 export interface StreamingOptions {
   language: string;
   sampleRateHz: number;
   encoding: 'linear16';
   enableInterim?: boolean;
+  /** Optional provider-specific model override; falls back to adapter defaults. */
+  model?: string;
+  /** Optional batch-only model override; falls back to model/defaults. */
+  batchModel?: string;
+  /** Optional fallback model used when primary fails (batch). */
+  fallbackModel?: string;
   contextPhrases?: readonly string[];
   punctuationPolicy?: PunctuationPolicy;
   enableVad?: boolean;
@@ -40,6 +52,11 @@ export interface PartialTranscript {
   isFinal: boolean;
   text: string;
   words?: readonly TranscriptWord[];
+  confidence?: number;
+  /** true if provider already inserted punctuation */
+  punctuationApplied?: boolean;
+  /** true if provider preserved original casing */
+  casingApplied?: boolean;
   timestamp: number;
   channel: 'mic' | 'file';
   latencyMs?: number;
@@ -66,6 +83,8 @@ export interface StreamingConfigMessage {
   normalizePreset?: string;
   pcm?: boolean;
   degraded?: boolean;
+  /** Actual AudioContext sample rate observed on the client. */
+  clientSampleRate?: number;
   options?: TranscriptionOptions;
 }
 
@@ -109,9 +128,32 @@ export interface StreamTranscriptMessage extends PartialTranscript {
   type: 'transcript';
 }
 
+export interface NormalizedTranscriptMessage {
+  type: 'normalized';
+  provider: ProviderId;
+  normalizedId: string;
+  segmentId: number;
+  windowId: number;
+  windowStartMs: number;
+  windowEndMs: number;
+  textRaw: string;
+  textNorm: string;
+  /** Portion of text newly added since the previous revision for this provider (optional). */
+  textDelta?: string;
+  isFinal: boolean;
+  revision: number;
+  latencyMs?: number;
+  originCaptureTs?: number;
+  confidence?: number | null;
+  punctuationApplied?: boolean | null;
+  casingApplied?: boolean | null;
+  words?: PartialTranscript['words'];
+}
+
 export interface StreamErrorMessage {
   type: 'error';
   message: string;
+  provider?: ProviderId;
 }
 
 export interface StreamSessionMessage {
@@ -119,9 +161,17 @@ export interface StreamSessionMessage {
   sessionId: string;
   provider: ProviderId;
   startedAt: string;
+  /** Observed input spec from client/replay source before per-provider resampling. */
+  inputSampleRate?: number;
+  /** Effective output spec delivered to the provider after resampling. */
+  audioSpec?: EffectiveAudioSpec;
 }
 
-export type StreamServerMessage = StreamTranscriptMessage | StreamErrorMessage | StreamSessionMessage;
+export type StreamServerMessage =
+  | StreamTranscriptMessage
+  | NormalizedTranscriptMessage
+  | StreamErrorMessage
+  | StreamSessionMessage;
 
 export interface StreamSessionEndMessage {
   type: 'session_end';
@@ -193,6 +243,8 @@ export interface BatchJobFileResult {
   refText?: string;
   degraded?: boolean;
   opts?: Record<string, unknown>;
+  /** Normalization actually applied when scoring */
+  normalizationUsed?: NormalizationConfig;
   /** ISO timestamp when the record was created (for retention / pruning) */
   createdAt?: string;
   /** Provider-reported processing time (if supplied by adapter) */

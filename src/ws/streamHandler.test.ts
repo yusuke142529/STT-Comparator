@@ -33,9 +33,15 @@ describe('handleStreamConnection', () => {
 
     const controller = {
       sendAudio: vi.fn(async (_chunk?: ArrayBufferLike, _meta?: { captureTs?: number }) => {
-        setTimeout(() => {
-          onDataHandler?.({ provider: 'mock', isFinal: false, text: 'hi', timestamp: Date.now(), channel: 'mic' });
-        }, 20);
+        if (onDataHandler) {
+          onDataHandler({
+            provider: 'mock',
+            isFinal: false,
+            text: 'hi',
+            timestamp: Date.now(),
+            channel: 'mic',
+          });
+        }
       }),
       end: vi.fn(async () => {}),
       close: vi.fn(async () => {}),
@@ -48,9 +54,11 @@ describe('handleStreamConnection', () => {
         onDataHandler = cb;
       },
       getOnData: () => onDataHandler,
+      startOptions: null as any,
       reset() {
         onDataHandler = null;
         passthrough.removeAllListeners();
+        this.startOptions = null;
       },
     };
   });
@@ -65,16 +73,19 @@ describe('handleStreamConnection', () => {
   }));
 
   vi.mock('../adapters/index.js', () => ({
-    getAdapter: vi.fn(() => ({
-      id: 'mock',
+    getAdapter: vi.fn((id: string) => ({
+      id,
       supportsStreaming: true,
       supportsBatch: true,
-      startStreaming: vi.fn(async () => ({
-        controller: state.controller,
-        onData: (cb: (t: any) => void) => state.setOnData(cb),
-        onError: () => {},
-        onClose: () => {},
-      })),
+      startStreaming: vi.fn(async (opts: any) => {
+        state.startOptions = opts;
+        return {
+          controller: state.controller,
+          onData: (cb: (t: any) => void) => state.setOnData(cb),
+          onError: () => {},
+          onClose: () => {},
+        };
+      }),
       transcribeFileFromPCM: vi.fn(),
     })),
   }));
@@ -232,7 +243,11 @@ describe('handleStreamConnection', () => {
 
     await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
 
-    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true })), false);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
 
     const HEADER_BYTES = 16;
     const frame = Buffer.alloc(HEADER_BYTES + 4);
@@ -250,6 +265,21 @@ describe('handleStreamConnection', () => {
     const transcript = messages.find((m) => m.type === 'transcript');
     expect(transcript).toBeDefined();
     expect(typeof transcript?.latencyMs).toBe('number');
-    expect(transcript?.latencyMs).toBeGreaterThanOrEqual(60);
+    expect(transcript?.latencyMs).toBeGreaterThanOrEqual(40);
+  });
+
+  it('uses provider-specific sample rate when per-provider transcode is enabled', async () => {
+    const { handleStreamConnection } = await import('./streamHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleStreamConnection(ws as any, 'openai', 'ja-JP', noopStore);
+
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      false
+    );
+
+    expect(state.startOptions?.sampleRateHz).toBe(24_000);
   });
 });

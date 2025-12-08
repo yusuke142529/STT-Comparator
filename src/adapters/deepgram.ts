@@ -11,6 +11,8 @@ const ENABLE_SMART_FORMAT = process.env.DEEPGRAM_SMART_FORMAT !== '0';
 const MAX_DEEPGRAM_BATCH_ATTEMPTS = 3;
 const IDLE_TIMEOUT_MS = 30_000;
 const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+const STREAM_IDLE_TIMEOUT_MS = 30_000;
+const STREAM_BUFFER_HIGH_WATER_BYTES = 5 * 1024 * 1024;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
 const BASE_RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 10_000;
@@ -321,17 +323,30 @@ export class DeepgramAdapter extends BaseAdapter {
       close: (() => void)[];
     } = { data: [], error: [], close: [] };
 
+    let lastMessageAt = Date.now();
+    const idleTimer = setInterval(() => {
+      const now = Date.now();
+      if (now - lastMessageAt > STREAM_IDLE_TIMEOUT_MS) {
+        const err = new Error('Deepgram websocket idle timeout');
+        listeners.error.forEach((cb) => cb(err));
+        closeWs();
+      }
+    }, Math.min(STREAM_IDLE_TIMEOUT_MS, 10_000));
+    (idleTimer as NodeJS.Timeout).unref?.();
+
     ws.on('message', (data) => {
+      lastMessageAt = Date.now();
       try {
         const json = JSON.parse(data.toString()) as DeepgramStreamingMessage;
         if (json.type === 'Results' && json.channel?.alternatives?.length) {
           const alt = json.channel.alternatives[0];
-          const isFinal = Boolean(json.is_final);
+          const isFinal = Boolean(json.is_final ?? json.isFinal ?? (json as any).speech_final);
           const transcript: PartialTranscript = {
             provider: this.id,
             isFinal,
             text: alt.transcript ?? '',
             words: alt.words?.map(mapDeepgramWord),
+            confidence: typeof alt.confidence === 'number' ? alt.confidence : undefined,
             timestamp: Date.now(),
             channel: 'mic',
           };
@@ -349,7 +364,13 @@ export class DeepgramAdapter extends BaseAdapter {
       listeners.error.forEach((cb) => cb(err as Error));
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code, reasonBuf) => {
+      clearInterval(idleTimer);
+      const reasonText = reasonBuf?.toString('utf8') || '';
+      const reason = new Error(
+        `Deepgram websocket closed (${code || 1000}${reasonText ? `: ${reasonText}` : ''})`
+      );
+      listeners.error.forEach((cb) => cb(reason));
       listeners.close.forEach((cb) => cb());
     });
 
@@ -375,9 +396,19 @@ export class DeepgramAdapter extends BaseAdapter {
       ws.close();
     };
 
+    async function waitForDrain() {
+      while (ws.bufferedAmount > STREAM_BUFFER_HIGH_WATER_BYTES) {
+        if (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
     const controller = {
       async sendAudio(chunk: ArrayBufferLike, _meta?: { captureTs?: number }) {
         await wsReady;
+        await waitForDrain();
         ws.send(Buffer.from(chunk));
       },
       async end() {

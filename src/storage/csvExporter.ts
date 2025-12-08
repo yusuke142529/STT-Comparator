@@ -9,7 +9,7 @@ function csvEscape(value: unknown): string {
 }
 
 export function toCsv(rows: BatchJobFileResult[]): string {
-  const header = ['path', 'provider', 'lang', 'cer', 'wer', 'rtf', 'latency_ms', 'degraded', 'text', 'ref_text'];
+  const header = ['path', 'provider', 'lang', 'cer', 'wer', 'rtf', 'latency_ms', 'degraded', 'normalization', 'text', 'ref_text'];
   const lines = rows.map((row) =>
     [
       csvEscape(row.path),
@@ -20,6 +20,7 @@ export function toCsv(rows: BatchJobFileResult[]): string {
       row.rtf ?? '',
       row.latencyMs ?? '',
       row.degraded ? 'true' : '',
+      row.normalizationUsed ? csvEscape(JSON.stringify(row.normalizationUsed)) : '',
       csvEscape(row.text),
       csvEscape(row.refText),
     ].join(',')

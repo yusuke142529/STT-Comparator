@@ -10,7 +10,19 @@ import type {
   RealtimeLatencySummary,
   RealtimeLogEntry,
   RealtimeLogSession,
+  NormalizationConfig,
 } from '../../types/app';
+
+const describeNormalization = (norm?: NormalizationConfig): string => {
+  if (!norm) return '未指定 (デフォルト)';
+  const parts: string[] = [];
+  if (norm.nfkc !== false) parts.push('NFKC');
+  if (norm.stripPunct) parts.push('句読点除去');
+  if (norm.stripSpace) parts.push('空白除去');
+  if (norm.lowercase) parts.push('lowercase');
+  if (parts.length === 0) return 'なし';
+  return parts.join(' / ');
+};
 
 interface ResultsViewProps {
   jobHistory: JobHistoryEntry[];
@@ -98,6 +110,8 @@ export const ResultsView = ({
   const latencyHistoryChrono = useMemo(() => [...latencyHistory].reverse(), [latencyHistory]);
 
   const latencyBySession = useMemo(() => new Map(latencyHistory.map((entry) => [entry.sessionId, entry])), [latencyHistory]);
+
+  const normalizationLabel = useMemo(() => describeNormalization(jobResults[0]?.normalizationUsed), [jobResults]);
 
   const logSessionMeta = useMemo(() => {
     if (!selectedLogSessionId) return null;
@@ -205,6 +219,7 @@ export const ResultsView = ({
                 ({(selectedHistoryEntry.providers ?? [selectedHistoryEntry.provider]).join(' vs ')} · {new Date(selectedHistoryEntry.updatedAt).toLocaleString()})
               </span>
             )}
+            <div style={{ marginTop: 4, fontSize: '0.85rem' }}>正規化: {normalizationLabel}</div>
           </div>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <button className="btn btn-ghost" onClick={() => exportResults('csv')} disabled={!lastJobId}><Icons.Download /> CSV出力</button>
@@ -494,7 +509,8 @@ export const ResultsView = ({
                               {renderLogMetadata(entry.payload, formatDate)}
                             </td>
                             <td className="log-latency">
-                              {entry.payload.type === 'transcript' && typeof entry.payload.latencyMs === 'number'
+                              {(entry.payload.type === 'transcript' || entry.payload.type === 'normalized') &&
+                              typeof (entry.payload as any).latencyMs === 'number'
                                 ? `${entry.payload.latencyMs}ms`
                                 : '-'}
                             </td>

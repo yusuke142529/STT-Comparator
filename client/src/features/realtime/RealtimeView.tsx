@@ -9,6 +9,7 @@ import { useRetry } from '../../hooks/useRetry';
 import { useStreamSession } from '../../hooks/useStreamSession';
 import { fmt, summarizeMetric } from '../../utils/metrics';
 import type { ProviderInfo, PunctuationPolicy } from '../../types/app';
+import { NormalizedTimeline } from './NormalizedTimeline';
 
 interface RealtimeViewProps {
   apiBase: string;
@@ -291,13 +292,17 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const buildWsUrl = useCallback(
     (path: 'stream' | 'stream-compare' | 'replay' | 'replay-multi', providerList: string[], sessionId?: string) => {
       const params = new URLSearchParams({ lang });
-      if (path === 'stream-compare') {
+      if (path === 'stream-compare' || path === 'replay-multi') {
         params.set('providers', providerList.join(','));
       } else {
         params.set('provider', providerList[0]);
       }
       if (sessionId) params.set('sessionId', sessionId);
-      const normalizedPath = path === 'stream-compare' ? 'stream/compare' : path;
+      const normalizedPath = (() => {
+        if (path === 'stream-compare') return 'stream/compare';
+        if (path === 'replay-multi') return 'replay';
+        return path;
+      })();
       return `${wsBase}/ws/${normalizedPath}?${params.toString()}`;
     },
     [lang, wsBase]
@@ -374,6 +379,28 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     [streamSession.transcripts, secondaryProvider]
   );
 
+  const activeProviders = useMemo(
+    () => [primaryProvider, ...(secondaryProvider && secondaryProvider !== primaryProvider ? [secondaryProvider] : [])],
+    [primaryProvider, secondaryProvider]
+  );
+
+  const alignedWindows = useMemo(() => {
+    if (streamSession.normalizedRows.length === 0) return [];
+    const map = new Map<number, typeof streamSession.normalizedRows>();
+    streamSession.normalizedRows.forEach((row) => {
+      if (!activeProviders.includes(row.provider)) return;
+      const list = map.get(row.windowId) ?? [];
+      list.push(row);
+      map.set(row.windowId, list);
+    });
+    return Array.from(map.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([, rows]) =>
+        rows.sort((a, b) => activeProviders.indexOf(a.provider) - activeProviders.indexOf(b.provider))
+      )
+      .slice(-Math.max(20, Math.ceil(120000 / chunkMs)));
+  }, [activeProviders, chunkMs, streamSession.normalizedRows]);
+
   const selectedProvider = useMemo(
     () => providers.find((item) => item.id === primaryProvider),
     [providers, primaryProvider]
@@ -390,11 +417,6 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const secondaryProviderStreamingReady = secondaryProvider
     ? secondaryProviderAvailable && (selectedSecondaryProvider?.supportsStreaming ?? true)
     : true;
-
-  const activeProviders = useMemo(
-    () => [primaryProvider, ...(secondaryProvider && secondaryProvider !== primaryProvider ? [secondaryProvider] : [])],
-    [primaryProvider, secondaryProvider]
-  );
 
   const micPermissionLabel = useMemo(() => {
     switch (micPermission) {
@@ -479,7 +501,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
         setPreviewPlaybackError('音声プレビューの初期化が完了していません。ファイルを選びなおして再実行してください。');
       }
       setReplayUploading(true);
-      void streamSession.startReplay(replayFile, { provider: primaryProvider, lang }).finally(() => {
+      void streamSession.startReplay(replayFile, { providers: activeProviders, lang }).finally(() => {
         setReplayUploading(false);
       });
     }
@@ -608,6 +630,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     secondaryTranscripts,
     primaryProvider,
     secondaryProvider,
+    alignedWindows,
+    activeProviders,
   };
 };
 
@@ -631,7 +655,10 @@ export const RealtimeView = (props: RealtimeViewProps) => {
     secondaryTranscripts,
     primaryProvider,
     secondaryProvider,
+    alignedWindows,
+    activeProviders,
   } = useRealtimeController(props);
+  const [viewMode, setViewMode] = useState<'normalized' | 'raw'>('normalized');
 
   return (
     <>
@@ -658,26 +685,46 @@ export const RealtimeView = (props: RealtimeViewProps) => {
           <ControlPanel {...controlPanelProps} />
         </div>
         <div className="transcript-column">
-          <div style={{ display: 'grid', gridTemplateColumns: secondaryProvider ? '1fr 1fr' : '1fr', gap: '12px' }}>
-            <TranscriptViewer
-              transcripts={primaryTranscripts}
-              containerRef={primaryTranscriptBodyRef}
-              showJumpButton={!isAutoScrollPrimary && primaryTranscripts.length > 0}
-              onJumpToBottom={jumpToBottom}
-              title={`${primaryProvider} Transcript`}
-              helperText="Primary"
-            />
-            {secondaryProvider && (
-              <TranscriptViewer
-                transcripts={secondaryTranscripts}
-                containerRef={secondaryTranscriptBodyRef}
-                showJumpButton={!isAutoScrollSecondary && secondaryTranscripts.length > 0}
-                onJumpToBottom={jumpToBottom}
-                title={`${secondaryProvider} Transcript`}
-                helperText="Secondary"
-              />
-            )}
+          <div className="view-toggle">
+            <button
+              type="button"
+              className={`toggle-btn ${viewMode === 'normalized' ? 'active' : ''}`}
+              onClick={() => setViewMode('normalized')}
+            >
+              正規化ビュー
+            </button>
+            <button
+              type="button"
+              className={`toggle-btn ${viewMode === 'raw' ? 'active' : ''}`}
+              onClick={() => setViewMode('raw')}
+            >
+              生データビュー
+            </button>
           </div>
+          {viewMode === 'normalized' ? (
+            <NormalizedTimeline windows={alignedWindows} providers={activeProviders} chunkMs={props.chunkMs} />
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: secondaryProvider ? '1fr 1fr' : '1fr', gap: '12px' }}>
+              <TranscriptViewer
+                transcripts={primaryTranscripts}
+                containerRef={primaryTranscriptBodyRef}
+                showJumpButton={!isAutoScrollPrimary && primaryTranscripts.length > 0}
+                onJumpToBottom={jumpToBottom}
+                title={`${primaryProvider} Transcript`}
+                helperText="Primary"
+              />
+              {secondaryProvider && (
+                <TranscriptViewer
+                  transcripts={secondaryTranscripts}
+                  containerRef={secondaryTranscriptBodyRef}
+                  showJumpButton={!isAutoScrollSecondary && secondaryTranscripts.length > 0}
+                  onJumpToBottom={jumpToBottom}
+                  title={`${secondaryProvider} Transcript`}
+                  helperText="Secondary"
+                />
+              )}
+            </div>
+          )}
           {statCards}
         </div>
       </div>

@@ -3,10 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { getAdapter } from '../adapters/index.js';
 import { logger } from '../logger.js';
-import { spawnPcmTranscoder } from '../utils/ffmpeg.js';
+import { createPcmResampler, spawnPcmTranscoder } from '../utils/ffmpeg.js';
 import { bufferToArrayBuffer } from '../utils/buffer.js';
 import { persistLatency } from '../utils/latency.js';
 import { streamingConfigMessageSchema } from '../validation.js';
+import { StreamNormalizer } from './streamNormalizer.js';
+import { parseStreamFrame } from '../utils/streamHeader.js';
+import {
+  getProviderSampleRate,
+  isPerProviderTranscodeEnabled,
+  requiresHighQualityTranscode,
+} from '../utils/providerAudio.js';
 import type {
   ProviderId,
   RealtimeLogPayload,
@@ -17,10 +24,9 @@ import type {
   StreamTranscriptMessage,
   StreamSessionMessage,
   StorageDriver,
+  NormalizedTranscriptMessage,
 } from '../types.js';
 import type { RealtimeTranscriptLogWriter } from '../storage/realtimeTranscriptStore.js';
-
-const HEADER_BYTES = 16; // seq(uint32) + captureTs(float64) + durationMs(float32)
 
 export async function handleStreamConnection(
   ws: WebSocket,
@@ -30,9 +36,15 @@ export async function handleStreamConnection(
   logStore?: RealtimeTranscriptLogWriter
 ) {
   const config = await loadConfig();
+  const providerSampleRate = getProviderSampleRate(provider, config);
+  const providerAudioConfig = { ...config.audio, targetSampleRate: providerSampleRate };
+  const perProviderTranscode = isPerProviderTranscodeEnabled();
+  const forcedPerProviderTranscode = requiresHighQualityTranscode(provider);
+  const effectivePerProviderTranscode = perProviderTranscode || forcedPerProviderTranscode;
   const adapter = getAdapter(provider);
   let transcoder: ReturnType<typeof spawnPcmTranscoder> | null = null;
-  const pcmQueue: Buffer[] = [];
+  let resampler: ReturnType<typeof createPcmResampler> | null = null;
+  const pcmQueue: Array<{ chunk: Buffer; meta?: { captureTs: number; durationMs: number; seq: number } }> = [];
   let queuedBytes = 0;
   let sessionStarted = false;
   let controller: Awaited<ReturnType<typeof adapter.startStreaming>>['controller'] | null = null;
@@ -40,21 +52,47 @@ export async function handleStreamConnection(
   let lastAudioSentAt: number | null = null;
   let firstCaptureTs: number | null = null;
   let lastCaptureTs: number | null = null;
-  const captureTsQueue: Array<number | undefined> = [];
+  let normalizer: StreamNormalizer | null = null;
+  const captureTsQueue: Array<{ captureTs: number; durationMs: number; seq: number }> = [];
+  let lastAttributed: { nextTs: number; durationMs: number } | null = null;
   const sessionId = randomUUID();
   const latencies: number[] = [];
   let lastTranscriptSignature: string | null = null;
   const startedAt = new Date().toISOString();
   const maxQueueBytes = config.ws?.maxPcmQueueBytes ?? 5 * 1024 * 1024;
+  const overflowGraceMs = config.ws?.overflowGraceMs ?? 500;
   let closed = false;
   let expectsPcm = false;
   let sessionDegraded = false;
+  let overflowTimer: NodeJS.Timeout | null = null;
+  let clientSampleRate = config.audio.targetSampleRate;
+
+  const ensureResampler = (inputSampleRate: number) => {
+    if (resampler) return resampler;
+    const created = createPcmResampler({
+      inputSampleRate,
+      outputSampleRate: providerSampleRate,
+      channels: config.audio.targetChannels,
+    });
+    created.onChunk((chunk, meta) => {
+      void flushChunk(chunk, meta);
+    });
+    created.onError((err) => handleFatal(err));
+    created.onClose((code) => {
+      if (closed) return;
+      if (typeof code === 'number' && code !== 0) {
+        handleFatal(new Error(`ffmpeg exited with code ${code}`));
+      }
+    });
+    resampler = created;
+    return created;
+  };
   const ensureTranscoder = () => {
     if (expectsPcm) {
       return null;
     }
     if (transcoder) return transcoder;
-    const spawned = spawnPcmTranscoder(config.audio);
+    const spawned = spawnPcmTranscoder(providerAudioConfig);
     transcoder = spawned;
     transcoder.stream.on('data', (chunk: Buffer) => {
       void flushChunk(chunk);
@@ -94,21 +132,36 @@ export async function handleStreamConnection(
     return true;
   };
 
-  function sendJson(payload: StreamTranscriptMessage | StreamErrorMessage | StreamSessionMessage) {
-    ws.send(JSON.stringify(payload));
-    recordLog(payload);
+  function sendJson(
+    payload: StreamTranscriptMessage | NormalizedTranscriptMessage | StreamErrorMessage | StreamSessionMessage
+  ) {
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch {
+      // even if the socket is closed, still persist the log for diagnostics
+    } finally {
+      recordLog(payload);
+    }
   }
 
   async function flushQueue() {
     if (!controller) return;
     while (pcmQueue.length > 0) {
-      const chunk = pcmQueue.shift();
-      if (!chunk) break;
-      queuedBytes -= chunk.length;
+      const entry = pcmQueue.shift();
+      if (!entry) break;
+      queuedBytes -= entry.chunk.length;
+      if (queuedBytes <= maxQueueBytes && overflowTimer) {
+        clearTimeout(overflowTimer);
+        overflowTimer = null;
+      }
       try {
-        const captureTs = lastCaptureTs ?? firstCaptureTs ?? Date.now();
-        await controller.sendAudio(bufferToArrayBuffer(chunk), { captureTs });
-        captureTsQueue.push(captureTs);
+        const captureTs = entry.meta?.captureTs ?? lastCaptureTs ?? firstCaptureTs ?? Date.now();
+        await controller.sendAudio(bufferToArrayBuffer(entry.chunk), { captureTs });
+        captureTsQueue.push({
+          captureTs,
+          durationMs: entry.meta?.durationMs ?? config.audio.chunkMs ?? 250,
+          seq: entry.meta?.seq ?? 0,
+        });
       } catch (err) {
         return handleFatal(err as Error);
       }
@@ -118,12 +171,31 @@ export async function handleStreamConnection(
     }
   }
 
-  const flushChunk = async (chunk: Buffer) => {
+  const flushChunk = async (
+    chunk: Buffer,
+    meta?: { captureTs: number; durationMs: number; seq: number }
+  ) => {
     if (!controller) {
-      pcmQueue.push(chunk);
+      pcmQueue.push({ chunk, meta });
       queuedBytes += chunk.length;
-      if (queuedBytes > maxQueueBytes) {
-        handleFatal(new Error('audio buffer limit exceeded'));
+      if (queuedBytes > maxQueueBytes && !overflowTimer) {
+        overflowTimer = setTimeout(() => {
+          if (queuedBytes > maxQueueBytes) {
+            handleFatal(
+              new Error(
+                `audio buffer backlog exceeded ${Math.round(maxQueueBytes / 1024)}KB; reduce input rate or chunk size`
+              )
+            );
+          } else {
+            overflowTimer = null;
+          }
+        }, overflowGraceMs);
+        logger.warn({
+          event: 'pcm_queue_backlog',
+          queuedBytes,
+          maxQueueBytes,
+          graceMs: overflowGraceMs,
+        });
       }
       return;
     }
@@ -133,7 +205,13 @@ export async function handleStreamConnection(
     } catch (err) {
       return handleFatal(err as Error);
     }
-    captureTsQueue.push(captureTs);
+    const durationMs = meta?.durationMs ?? config.audio.chunkMs ?? 250;
+    const seq = meta?.seq ?? 0;
+    captureTsQueue.push({
+      captureTs: meta?.captureTs ?? captureTs,
+      durationMs,
+      seq,
+    });
     const now = Date.now();
     if (!firstAudioSentAt) firstAudioSentAt = now;
     lastAudioSentAt = now;
@@ -142,7 +220,10 @@ export async function handleStreamConnection(
   function handleFatal(err: Error) {
     if (closed) return;
     closed = true;
+    // Log the error before attempting to send to the client to ensure it lands in realtime-logs.jsonl
+    recordLog({ type: 'error', message: err.message, provider });
     sendJson({ type: 'error', message: err.message });
+    resampler?.end();
     transcoder?.end();
     ws.close();
   }
@@ -162,10 +243,37 @@ export async function handleStreamConnection(
           sessionStarted = true;
           expectsPcm = !!configMsg.pcm;
           sessionDegraded = !!configMsg.degraded;
-          sendJson({ type: 'session', sessionId, provider, startedAt });
+          normalizer = new StreamNormalizer({
+            bucketMs: config.audio.chunkMs ?? 250,
+            preset: configMsg.normalizePreset,
+            sessionId,
+          });
+          // clientSampleRate is required for pcm=true; schema enforces this, but keep a defensive check.
+          clientSampleRate = expectsPcm
+            ? configMsg.clientSampleRate ?? providerSampleRate
+            : configMsg.clientSampleRate ?? providerSampleRate;
+
+          logger.info({
+            event: 'stream_session_start',
+            provider,
+            lang,
+            clientSampleRate,
+            effectiveSampleRate: providerSampleRate,
+            perProviderTranscode: effectivePerProviderTranscode,
+            forcedPerProviderTranscode,
+          });
+
+          sendJson({
+            type: 'session',
+            sessionId,
+            provider,
+            startedAt,
+            inputSampleRate: clientSampleRate,
+            audioSpec: { sampleRate: providerSampleRate, channels: 1, format: 'pcm16le' },
+          });
           const streamingSession = await adapter.startStreaming({
             language: lang,
-            sampleRateHz: config.audio.targetSampleRate,
+            sampleRateHz: effectivePerProviderTranscode ? providerSampleRate : clientSampleRate,
             encoding: 'linear16',
             enableInterim: configMsg.enableInterim,
             contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
@@ -176,9 +284,32 @@ export async function handleStreamConnection(
           });
           controller = streamingSession.controller;
           streamingSession.onData((transcript) => {
+            const attribution =
+              captureTsQueue.shift() ??
+              (lastAttributed
+                ? {
+                    captureTs: lastAttributed.nextTs,
+                    durationMs: lastAttributed.durationMs,
+                    seq: 0,
+                  }
+                : null);
+
+            if (attribution) {
+              lastAttributed = {
+                nextTs: attribution.captureTs + attribution.durationMs,
+                durationMs: attribution.durationMs,
+              };
+            }
+
             const originCaptureTs =
-              captureTsQueue.shift() ?? lastCaptureTs ?? firstCaptureTs ?? lastAudioSentAt ?? firstAudioSentAt;
-            const latencyMs = typeof originCaptureTs === 'number' ? Date.now() - originCaptureTs : 0;
+              attribution?.captureTs ??
+              lastCaptureTs ??
+              firstCaptureTs ??
+              lastAudioSentAt ??
+              firstAudioSentAt ??
+              Date.now();
+
+            const latencyMs = Date.now() - originCaptureTs;
             if (typeof latencyMs === 'number') {
               latencies.push(latencyMs);
             }
@@ -193,9 +324,31 @@ export async function handleStreamConnection(
             if (!shouldEmitTranscript(payload)) {
               return;
             }
+            const normalized = normalizer?.ingest(provider, {
+              provider,
+              isFinal: payload.isFinal,
+              text: payload.text,
+              words: payload.words,
+              timestamp: payload.originCaptureTs ?? payload.timestamp ?? Date.now(),
+              channel: payload.channel,
+              latencyMs: payload.latencyMs,
+              originCaptureTs: payload.originCaptureTs,
+              confidence: payload.confidence,
+              punctuationApplied: payload.punctuationApplied,
+              casingApplied: payload.casingApplied,
+            });
             sendJson(payload);
+            if (normalized) {
+              const normalizedMsg: NormalizedTranscriptMessage = {
+                type: 'normalized',
+                ...normalized,
+              };
+              sendJson(normalizedMsg);
+            }
           });
           streamingSession.onError((err) => {
+            // Persist API/WS error details for later triage
+            recordLog({ type: 'error', message: err.message, provider });
             handleFatal(err);
           });
           streamingSession.onClose(() => {
@@ -215,17 +368,30 @@ export async function handleStreamConnection(
       if (isBinary) {
         const buffer = normalizeRawData(data);
         if (expectsPcm) {
-          if (buffer.length <= HEADER_BYTES) {
-            return handleFatal(new Error('invalid pcm frame'));
+          try {
+            const { header, pcm } = parseStreamFrame(buffer);
+            lastCaptureTs = header.captureTs;
+            if (!firstCaptureTs) firstCaptureTs = header.captureTs;
+            const durationMs = header.durationMs || config.audio.chunkMs || 250;
+            const needsResample = effectivePerProviderTranscode && providerSampleRate !== clientSampleRate;
+            if (needsResample) {
+              const pipeline = ensureResampler(clientSampleRate);
+              await pipeline.input(pcm, {
+                captureTs: header.captureTs,
+                durationMs,
+                seq: header.seq,
+              });
+            } else {
+              await flushChunk(pcm, {
+                captureTs: header.captureTs,
+                durationMs,
+                seq: header.seq,
+              });
+            }
+            return;
+          } catch (err) {
+            return handleFatal(err as Error);
           }
-          const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-          const captureTs = view.getFloat64(4, true);
-          const pcmStart = HEADER_BYTES;
-          const pcmChunk = buffer.subarray(pcmStart);
-          lastCaptureTs = captureTs;
-          if (!firstCaptureTs) firstCaptureTs = captureTs;
-          await flushChunk(pcmChunk);
-          return;
         }
         const activeTranscoder = ensureTranscoder();
         await activeTranscoder.input(buffer);
@@ -235,6 +401,7 @@ export async function handleStreamConnection(
 
   ws.on('close', () => {
     void (async () => {
+      resampler?.end();
       transcoder?.end();
       await controller?.end();
       await controller?.close();
@@ -254,7 +421,7 @@ export async function handleStreamConnection(
 
   ws.on('error', (err) => {
     logger.error({ event: 'ws_error', message: err.message });
-    sendJson({ type: 'error', message: err.message });
+    handleFatal(err);
   });
 }
 
