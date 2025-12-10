@@ -76,11 +76,13 @@ export const describeLogPayload = (payload: RealtimeLogPayload): string => {
     case 'transcript': {
       const status = payload.isFinal ? '確定' : '途中';
       const channel = payload.channel === 'file' ? 'ファイル' : 'マイク';
-      return `${channel} (${status}): ${payload.text}`;
+      const speaker = payload.speakerId ? ` [Spk ${payload.speakerId}]` : '';
+      return `${channel} (${status})${speaker}: ${payload.text}`;
     }
     case 'normalized': {
       const status = payload.isFinal ? '確定' : '途中';
-      return `整列(${status}) [win ${payload.windowId}] ${payload.textNorm || payload.textRaw || ''}`;
+      const speaker = (payload as any).speakerId ? ` [Spk ${(payload as any).speakerId}]` : '';
+      return `整列(${status})${speaker} [win ${payload.windowId}] ${payload.textNorm || payload.textRaw || ''}`;
     }
     case 'error':
       return payload.message;
@@ -104,6 +106,7 @@ export const renderLogMetadata = (
     case 'transcript': {
       const metadata = renderMetadataRows([
         ['チャネル', payload.channel === 'file' ? 'ファイル' : 'マイク'],
+        ['スピーカー', payload.speakerId ?? null],
         ['ステータス', payload.isFinal ? '確定' : '途中'],
         ['タイムスタンプ', typeof payload.timestamp === 'number' ? `${payload.timestamp} ms` : null],
         ['単語数', payload.words ? String(payload.words.length) : '0'],
@@ -123,6 +126,7 @@ export const renderLogMetadata = (
         ['確定/途中', payload.isFinal ? '確定' : '途中'],
         ['リビジョン', `rev${payload.revision}`],
         ['originCaptureTs', payload.originCaptureTs ? `${payload.originCaptureTs} ms` : null],
+        ['スピーカー', (payload as any).speakerId ?? null],
       ]);
       return metadata;
     }

@@ -26,6 +26,10 @@ interface RealtimeViewProps {
   setEnableInterim: (value: boolean) => void;
   enableVad: boolean;
   setEnableVad: (value: boolean) => void;
+  enableDiarization: boolean;
+  setEnableDiarization: (value: boolean) => void;
+  enableChannelSplit: boolean;
+  setEnableChannelSplit: (value: boolean) => void;
   punctuationPolicy: PunctuationPolicy;
   setPunctuationPolicy: (value: PunctuationPolicy) => void;
   parallel: number;
@@ -52,6 +56,10 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     setEnableInterim,
     enableVad,
     setEnableVad,
+    enableDiarization,
+    setEnableDiarization,
+    enableChannelSplit,
+    setEnableChannelSplit,
     punctuationPolicy,
     setPunctuationPolicy,
     parallel,
@@ -70,6 +78,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const supportsDictionary = selectedProviderInfo?.supportsDictionaryPhrases !== false;
   const supportsContext = selectedProviderInfo?.supportsContextPhrases !== false;
   const supportsPunctuation = selectedProviderInfo?.supportsPunctuationPolicy !== false;
+  const supportsDiarization = selectedProviderInfo?.supportsDiarization !== false;
 
   const [inputSource, setInputSource] = useState<'mic' | 'file'>('mic');
   const [replayFile, setReplayFile] = useState<File | null>(null);
@@ -163,6 +172,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     error: audioOutputDevicesError,
     hasDevices: hasAudioOutputDevices,
     refresh: refreshAudioOutputDevices,
+    requestSelectAudioOutput,
+    selecting: selectingAudioOutput,
   } = useAudioOutputDevices();
 
   const {
@@ -258,14 +269,24 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     }
   }, [supportsPunctuation, punctuationOptions, punctuationPolicy, setPunctuationPolicy]);
 
+  useEffect(() => {
+    if (!supportsDiarization && enableDiarization) {
+      setEnableDiarization(false);
+    }
+  }, [supportsDiarization, enableDiarization, setEnableDiarization]);
+
   const buildStreamingConfig = useCallback(() => {
     const options: {
       enableVad: boolean;
+      enableDiarization: boolean;
+      enableChannelSplit: boolean;
       punctuationPolicy: PunctuationPolicy;
       parallel: number;
       dictionaryPhrases?: string[];
     } = {
       enableVad,
+      enableDiarization: supportsDiarization ? enableDiarization : false,
+      enableChannelSplit,
       punctuationPolicy,
       parallel,
     };
@@ -282,10 +303,13 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     dictionaryPhrases,
     enableInterim,
     enableVad,
+    enableDiarization,
+    enableChannelSplit,
     parallel,
     punctuationPolicy,
     supportsContext,
     supportsDictionary,
+    supportsDiarization,
   ]);
 
   const wsBase = useMemo(() => apiBase.replace(/^http/, 'ws').replace(/\/$/, ''), [apiBase]);
@@ -315,6 +339,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     buildStreamingConfig,
     buildWsUrl,
     retry: realtimeRetry,
+    enableChannelSplit,
     onSessionClose: () => {
       void refreshLatencyHistory();
       void refreshLogSessions();
@@ -578,6 +603,11 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     setEnableInterim,
     enableVad,
     setEnableVad,
+    supportsDiarization,
+    enableDiarization,
+    setEnableDiarization,
+    enableChannelSplit,
+    setEnableChannelSplit,
     allowDegraded,
     setAllowDegraded,
     replayFile,
@@ -599,6 +629,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     audioOutputDevicesError,
     hasAudioOutputDevices,
     refreshAudioOutputDevices,
+    requestSelectAudioOutput,
+    selectingAudioOutput,
     selectedOutputDeviceId,
     setSelectedOutputDeviceId,
     isReplayAudioMuted,

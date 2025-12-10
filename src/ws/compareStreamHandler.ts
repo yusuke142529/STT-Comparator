@@ -69,15 +69,19 @@ export async function handleCompareStreamConnection(
   const sessions = new Map<ProviderId, ProviderSession>();
   const sessionId = randomUUID();
   const startedAt = new Date().toISOString();
-  const maxQueueBytes = config.ws?.maxPcmQueueBytes ?? 5 * 1024 * 1024;
+  let maxQueueBytes = config.ws?.maxPcmQueueBytes ?? 5 * 1024 * 1024;
   const compareWs = config.ws?.compare ?? {};
   const backlogSoft = compareWs.backlogSoft ?? 8;
   const backlogHard = compareWs.backlogHard ?? Math.max(backlogSoft * 4, 32);
   const maxDropMs = compareWs.maxDropMs ?? 1000;
+  const keepaliveMs = config.ws?.keepaliveMs ?? 30_000;
+  const maxMissedPongs = config.ws?.maxMissedPongs ?? 2;
   const chunkDurationMs = config.audio.chunkMs ?? 250;
   let closed = false;
   let expectsPcm = false;
   let sessionDegraded = false;
+  let keepaliveTimer: NodeJS.Timeout | null = null;
+  let missedPongs = 0;
   let normalizer: StreamNormalizer | null = null;
   let clientSampleRate = config.audio.targetSampleRate;
   let closeResolve: (() => void) | null = null;
@@ -120,7 +124,7 @@ export async function handleCompareStreamConnection(
   };
 
   const buildTranscriptSignature = (provider: ProviderId, payload: StreamTranscriptMessage): string =>
-    `${provider}:${payload.channel}:${payload.isFinal ? 'final' : 'interim'}:${payload.text}`;
+    `${provider}:${payload.channel}:${payload.speakerId ?? 'unknown'}:${payload.isFinal ? 'final' : 'interim'}:${payload.text}`;
 
   const shouldEmitTranscript = (provider: ProviderId, payload: StreamTranscriptMessage): boolean => {
     const signature = buildTranscriptSignature(provider, payload);
@@ -275,6 +279,10 @@ export async function handleCompareStreamConnection(
   function handleFatal(err: Error) {
     if (closed) return;
     closed = true;
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+    }
     sendJson({ type: 'error', message: err.message } as StreamErrorMessage);
     for (const session of sessions.values()) {
       session.resampler?.end();
@@ -285,6 +293,17 @@ export async function handleCompareStreamConnection(
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
+      if (!isBinary) {
+        try {
+          const parsed = JSON.parse(data.toString()) as { type?: string };
+          if (parsed?.type === 'pong') {
+            missedPongs = 0;
+            return;
+          }
+        } catch {
+          // ignore control frames
+        }
+      }
       if (!sessionStarted && isBinary) {
         sendJson({ type: 'error', message: 'config message required before audio' } as StreamErrorMessage);
         transcoder?.end();
@@ -299,6 +318,10 @@ export async function handleCompareStreamConnection(
           sessionStarted = true;
           expectsPcm = !!configMsg.pcm;
           sessionDegraded = !!configMsg.degraded;
+          const isMeetingMode = configMsg.options?.meetingMode === true;
+          if (isMeetingMode && config.ws?.meeting) {
+            maxQueueBytes = config.ws.meeting.maxPcmQueueBytes ?? maxQueueBytes;
+          }
           normalizer = new StreamNormalizer({
             bucketMs: config.audio.chunkMs ?? 250,
             preset: configMsg.normalizePreset,
@@ -331,6 +354,7 @@ export async function handleCompareStreamConnection(
                 contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
                 punctuationPolicy: configMsg.options?.punctuationPolicy,
                 enableVad: configMsg.options?.enableVad,
+                enableDiarization: configMsg.options?.enableDiarization,
                 dictionaryPhrases: configMsg.options?.dictionaryPhrases,
                 normalizePreset: configMsg.normalizePreset,
               });
@@ -455,6 +479,20 @@ export async function handleCompareStreamConnection(
             })
           );
 
+          keepaliveTimer = setInterval(() => {
+            if (closed) return;
+            if (missedPongs >= maxMissedPongs) {
+              handleFatal(new Error('stream keepalive timeout'));
+              return;
+            }
+            missedPongs += 1;
+            try {
+              ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+            } catch {
+              /* ignore */
+            }
+          }, keepaliveMs);
+
           await flushQueue();
           return;
         } catch (err) {
@@ -490,6 +528,10 @@ export async function handleCompareStreamConnection(
   ws.on('close', () => {
     closeResolve?.();
     void (async () => {
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
       try {
         transcoder?.end();
         for (const [provider, session] of sessions.entries()) {

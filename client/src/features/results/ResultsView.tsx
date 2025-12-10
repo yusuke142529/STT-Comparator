@@ -496,26 +496,36 @@ export const ResultsView = ({
                         </tr>
                       </thead>
                       <tbody>
-                        {logEntries.map((entry, index) => (
-                          <tr key={`${entry.recordedAt}-${entry.payload.type}-${index}`}>
-                            <td>{formatDate(entry.recordedAt)}</td>
-                            <td>
-                              <span className={`log-type ${LOG_TYPE_CLASSES[entry.payload.type]}`}>
-                                {LOG_TYPE_LABELS[entry.payload.type]}
-                              </span>
-                            </td>
-                            <td>
-                              <div>{describeLogPayload(entry.payload)}</div>
-                              {renderLogMetadata(entry.payload, formatDate)}
-                            </td>
-                            <td className="log-latency">
-                              {(entry.payload.type === 'transcript' || entry.payload.type === 'normalized') &&
-                              typeof (entry.payload as any).latencyMs === 'number'
-                                ? `${entry.payload.latencyMs}ms`
-                                : '-'}
-                            </td>
-                          </tr>
-                        ))}
+                        {logEntries.map((entry, index) => {
+                          const speakerId =
+                            (entry.payload.type === 'transcript' || entry.payload.type === 'normalized') &&
+                            (entry.payload as any).speakerId
+                              ? String((entry.payload as any).speakerId)
+                              : null;
+                          return (
+                            <tr key={`${entry.recordedAt}-${entry.payload.type}-${index}`}>
+                              <td>{formatDate(entry.recordedAt)}</td>
+                              <td>
+                                <span className={`log-type ${LOG_TYPE_CLASSES[entry.payload.type]}`}>
+                                  {LOG_TYPE_LABELS[entry.payload.type]}
+                                </span>
+                              </td>
+                              <td>
+                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                  {speakerId ? <span className="speaker-badge">{speakerId}</span> : null}
+                                  <span>{describeLogPayload(entry.payload)}</span>
+                                </div>
+                                {renderLogMetadata(entry.payload, formatDate)}
+                              </td>
+                              <td className="log-latency">
+                                {(entry.payload.type === 'transcript' || entry.payload.type === 'normalized') &&
+                                typeof (entry.payload as any).latencyMs === 'number'
+                                  ? `${entry.payload.latencyMs}ms`
+                                  : '-'}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

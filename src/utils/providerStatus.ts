@@ -13,6 +13,7 @@ export interface ProviderAvailability {
   supportsDictionaryPhrases?: boolean;
   supportsPunctuationPolicy?: boolean;
   supportsContextPhrases?: boolean;
+  supportsDiarization?: boolean;
 }
 
 interface StatusCodeError extends Error {
@@ -37,12 +38,13 @@ interface ProviderFeatureFlags {
   dictionary?: boolean;
   punctuation?: boolean;
   context?: boolean;
+  diarization?: boolean;
 }
 
 const PROVIDER_FEATURE_OVERRIDES: Record<ProviderId, ProviderFeatureFlags> = {
-  deepgram: { dictionary: true, punctuation: true, context: true },
-  elevenlabs: { dictionary: false, punctuation: false, context: false },
-  openai: { dictionary: true, punctuation: true, context: true },
+  deepgram: { dictionary: true, punctuation: true, context: true, diarization: true },
+  elevenlabs: { dictionary: false, punctuation: false, context: false, diarization: true },
+  openai: { dictionary: true, punctuation: true, context: true, diarization: true },
   local_whisper: {},
   mock: {},
   azure: {},
@@ -86,6 +88,7 @@ export async function computeProviderAvailability(
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
       });
       continue;
     }
@@ -101,6 +104,7 @@ export async function computeProviderAvailability(
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
       });
       continue;
     }
@@ -116,21 +120,41 @@ export async function computeProviderAvailability(
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
       });
       continue;
     }
-    if (id === 'openai' && !process.env.OPENAI_API_KEY) {
-      const features = PROVIDER_FEATURE_OVERRIDES[id];
+    if (id === 'openai') {
+      const diarizationEnabled = process.env.OPENAI_ENABLE_DIARIZATION === 'true';
+      const features = {
+        ...PROVIDER_FEATURE_OVERRIDES[id],
+        diarization: diarizationEnabled ? PROVIDER_FEATURE_OVERRIDES[id].diarization : false,
+      };
+      if (!process.env.OPENAI_API_KEY) {
+        results.push({
+          id,
+          available: false,
+          implemented: true,
+          supportsStreaming,
+          supportsBatch,
+          reason: 'OPENAI_API_KEY is not set',
+          supportsDictionaryPhrases: features?.dictionary,
+          supportsPunctuationPolicy: features?.punctuation,
+          supportsContextPhrases: features?.context,
+          supportsDiarization: features?.diarization,
+        });
+        continue;
+      }
       results.push({
         id,
-        available: false,
+        available: true,
         implemented: true,
         supportsStreaming,
         supportsBatch,
-        reason: 'OPENAI_API_KEY is not set',
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
       });
       continue;
     }
@@ -144,15 +168,16 @@ export async function computeProviderAvailability(
           implemented: true,
           supportsStreaming,
           supportsBatch,
-          reason: runtime.reason ?? 'whisper runtime unavailable',
-          supportsDictionaryPhrases: features?.dictionary,
-          supportsPunctuationPolicy: features?.punctuation,
-          supportsContextPhrases: features?.context,
-        });
-        continue;
-      }
-      const features = PROVIDER_FEATURE_OVERRIDES[id];
-      results.push({
+        reason: runtime.reason ?? 'whisper runtime unavailable',
+        supportsDictionaryPhrases: features?.dictionary,
+        supportsPunctuationPolicy: features?.punctuation,
+        supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
+      });
+      continue;
+    }
+    const features = PROVIDER_FEATURE_OVERRIDES[id];
+    results.push({
         id,
         available: true,
         implemented: true,
@@ -162,6 +187,7 @@ export async function computeProviderAvailability(
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
       });
       continue;
     }
@@ -179,6 +205,7 @@ export async function computeProviderAvailability(
         supportsDictionaryPhrases: features?.dictionary,
         supportsPunctuationPolicy: features?.punctuation,
         supportsContextPhrases: features?.context,
+        supportsDiarization: features?.diarization,
       });
       continue;
     }
@@ -192,6 +219,7 @@ export async function computeProviderAvailability(
       supportsDictionaryPhrases: features?.dictionary,
       supportsPunctuationPolicy: features?.punctuation,
       supportsContextPhrases: features?.context,
+      supportsDiarization: features?.diarization,
     });
   }
 

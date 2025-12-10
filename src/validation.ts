@@ -3,6 +3,9 @@ import { z } from 'zod';
 export const transcriptionOptionsSchema = z
   .object({
     enableVad: z.boolean().optional(),
+    enableDiarization: z.boolean().optional(),
+    enableChannelSplit: z.boolean().optional(),
+    meetingMode: z.boolean().optional(),
     punctuationPolicy: z.enum(['none', 'basic', 'full']).optional(),
     dictionaryPhrases: z.array(z.string()).max(100).optional(),
     parallel: z.number().int().min(1).max(16).optional(),
@@ -21,6 +24,8 @@ export const streamingConfigMessageSchema = z
     // to avoid assuming 16 kHz when the browser/hardware forces a different
     // rate (common on some Windows devices).
     clientSampleRate: z.number().int().min(8_000).max(96_000).optional(),
+    channels: z.number().int().min(1).max(2).optional(),
+    channelSplit: z.boolean().optional(),
     options: transcriptionOptionsSchema.optional(),
   })
   .strict()

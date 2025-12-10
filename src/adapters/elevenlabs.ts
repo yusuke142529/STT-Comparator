@@ -66,6 +66,7 @@ interface ElevenLabsStreamingEvent {
   text?: string;
   words?: unknown[];
   message?: string;
+  speaker?: string | number;
 }
 
 interface ElevenLabsBatchResponse {
@@ -165,6 +166,9 @@ function normalizeWords(items: unknown[] | undefined): TranscriptWord[] | undefi
     if (typeof entry.confidence === 'number') {
       transcriptWord.confidence = entry.confidence;
     }
+    if (entry.speaker !== undefined && entry.speaker !== null) {
+      transcriptWord.speakerId = String(entry.speaker);
+    }
     mapped.push(transcriptWord);
   }
   return mapped.length > 0 ? mapped : undefined;
@@ -232,6 +236,9 @@ export class ElevenLabsAdapter extends BaseAdapter {
       commit_strategy: commitStrategy,
       include_timestamps: INCLUDE_TIMESTAMPED_COMMITS ? 'true' : 'false',
     });
+    if (opts.enableDiarization) {
+      params.set('diarization', 'true');
+    }
     const allowInterim = opts.enableInterim !== false;
     const normalizedLanguage = normalizeIsoLanguageCode(opts.language);
     if (normalizedLanguage) {
@@ -258,6 +265,9 @@ export class ElevenLabsAdapter extends BaseAdapter {
 
     const emitTranscript = (data: ElevenLabsStreamingEvent, isFinal: boolean, words?: TranscriptWord[]) => {
       const text = typeof data.text === 'string' ? data.text : '';
+      const speakerFromWords = words?.find((w) => (w as any).speakerId)?.speakerId;
+      const speakerFromEvent =
+        typeof data.speaker === 'number' || typeof data.speaker === 'string' ? String(data.speaker) : undefined;
       const payload: PartialTranscript = {
         provider: this.id,
         isFinal,
@@ -265,6 +275,7 @@ export class ElevenLabsAdapter extends BaseAdapter {
         words,
         timestamp: Date.now(),
         channel: 'mic',
+        speakerId: speakerFromWords ?? speakerFromEvent,
       };
       listeners.data.forEach((cb) => cb(payload));
     };

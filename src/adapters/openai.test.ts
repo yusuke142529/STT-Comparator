@@ -40,6 +40,48 @@ describe('OpenAIAdapter streaming', () => {
     wsState.instances.length = 0;
   });
 
+  it('passes diarization flag and surfaces speakerId from events', async () => {
+    const adapter = new OpenAIAdapter();
+    const session = await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 16000,
+      encoding: 'linear16',
+      enableDiarization: true,
+    });
+
+    const ws = wsState.instances[0];
+    await new Promise((r) => setTimeout(r, 10));
+    const firstSend = ws.sent[0] as string;
+    const parsed = JSON.parse(firstSend);
+    expect(parsed.session?.input_audio_transcription?.diarization).toBe(true);
+
+    const seen: Array<{ text: string; speakerId?: string }> = [];
+    session.onData((t) => seen.push({ text: t.text, speakerId: t.speakerId }));
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'item-1',
+        delta: { transcript: 'hi', speaker: 'A' },
+      })
+    );
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-1',
+        delta: { transcript: 'hi there', speaker: 'B' },
+      })
+    );
+
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen).toEqual([
+      { text: 'hi', speakerId: 'A' },
+      { text: 'hi there', speakerId: 'B' },
+    ]);
+  });
+
   it('sends session.update with transcription audio config and base64 audio, emits transcripts', async () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({

@@ -35,6 +35,8 @@ export default function App() {
   const [dictionary, setDictionary] = useState('');
   const [enableInterim, setEnableInterim] = useState(true);
   const [enableVad, setEnableVad] = useState(false);
+  const [enableDiarization, setEnableDiarization] = useState(false);
+  const [enableChannelSplit, setEnableChannelSplit] = useState(false);
   const [punctuationPolicy, setPunctuationPolicy] = useState<PunctuationPolicy>('full');
   const [parallel, setParallel] = useState(1);
   const [chunkMs, setChunkMs] = useState(250);
@@ -234,6 +236,10 @@ export default function App() {
           setEnableInterim={setEnableInterim}
           enableVad={enableVad}
           setEnableVad={setEnableVad}
+          enableDiarization={enableDiarization}
+          setEnableDiarization={setEnableDiarization}
+          enableChannelSplit={enableChannelSplit}
+          setEnableChannelSplit={setEnableChannelSplit}
           punctuationPolicy={punctuationPolicy}
           setPunctuationPolicy={setPunctuationPolicy}
           parallel={parallel}

@@ -26,6 +26,7 @@ export interface StreamingOptions {
   sampleRateHz: number;
   encoding: 'linear16';
   enableInterim?: boolean;
+  enableDiarization?: boolean;
   /** Optional provider-specific model override; falls back to adapter defaults. */
   model?: string;
   /** Optional batch-only model override; falls back to model/defaults. */
@@ -45,6 +46,7 @@ export interface TranscriptWord {
   endSec: number;
   text: string;
   confidence?: number;
+  speakerId?: string;
 }
 
 export interface PartialTranscript {
@@ -57,6 +59,8 @@ export interface PartialTranscript {
   punctuationApplied?: boolean;
   /** true if provider preserved original casing */
   casingApplied?: boolean;
+  /** Optional speaker/diarization label provided by the ASR backend. */
+  speakerId?: string;
   timestamp: number;
   channel: 'mic' | 'file';
   latencyMs?: number;
@@ -71,6 +75,9 @@ export type PunctuationPolicy = 'none' | 'basic' | 'full';
 
 export interface TranscriptionOptions {
   enableVad?: boolean;
+  enableDiarization?: boolean;
+  enableChannelSplit?: boolean;
+  meetingMode?: boolean;
   punctuationPolicy?: PunctuationPolicy;
   dictionaryPhrases?: readonly string[];
   parallel?: number;
@@ -85,6 +92,10 @@ export interface StreamingConfigMessage {
   degraded?: boolean;
   /** Actual AudioContext sample rate observed on the client. */
   clientSampleRate?: number;
+  /** Number of channels captured by the client (1=mono, 2=stereo). */
+  channels?: number;
+  /** Enable client-side L/R channel split when sending PCM. */
+  channelSplit?: boolean;
   options?: TranscriptionOptions;
 }
 

@@ -231,12 +231,23 @@ const extractCompletedText = (payload: unknown): string => {
   return '';
 };
 
+const extractSpeaker = (payload: unknown): string | null => {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.speaker === 'string') return payload.speaker;
+  if (typeof payload.speaker_label === 'string') return payload.speaker_label;
+  if (isRecord(payload.delta) && typeof payload.delta.speaker === 'string') {
+    return payload.delta.speaker;
+  }
+  return null;
+};
+
 function toPartialTranscript(message: unknown, allowInterim: boolean): PartialTranscript | null {
   if (!isRecord(message)) return null;
   const type = typeof message.type === 'string' ? message.type : '';
   if (!type) return null;
 
   const now = Date.now();
+  const speakerId = extractSpeaker(message) ?? undefined;
 
   if (type === 'conversation.item.input_audio_transcription.segment') {
     if (!allowInterim) return null;
@@ -264,6 +275,7 @@ function toPartialTranscript(message: unknown, allowInterim: boolean): PartialTr
       words,
       timestamp: now,
       channel: 'mic',
+      speakerId,
     };
   }
 
@@ -289,6 +301,7 @@ function toPartialTranscript(message: unknown, allowInterim: boolean): PartialTr
     words: undefined,
     timestamp: now,
     channel: 'mic',
+    speakerId,
   };
 }
 
@@ -397,6 +410,7 @@ export class OpenAIAdapter extends BaseAdapter {
     const sourceSampleRate = opts.sampleRateHz ?? 16_000;
     const allowInterim = opts.enableInterim !== false;
     const serverVadEnabled = opts.enableVad !== false;
+    const enableDiarization = opts.enableDiarization === true;
 
     if (!Number.isFinite(sourceSampleRate) || sourceSampleRate <= 0) {
       throw new Error(`invalid sampleRateHz: ${sourceSampleRate}`);
@@ -473,6 +487,7 @@ export class OpenAIAdapter extends BaseAdapter {
             model,
             language: language ?? '',
             prompt: opts.dictionaryPhrases?.join(', ') ?? '',
+            diarization: enableDiarization ? true : undefined,
           },
           turn_detection: serverVadEnabled
             ? {
@@ -548,6 +563,7 @@ export class OpenAIAdapter extends BaseAdapter {
             if (allowInterim) {
               const deltaText = extractDeltaText(payload);
               if (deltaText) {
+                const speakerId = extractSpeaker(payload) ?? undefined;
                 const next = (partialByItem.get(itemId) ?? '') + deltaText;
                 partialByItem.set(itemId, next);
                 listeners.data.forEach((cb) =>
@@ -558,6 +574,7 @@ export class OpenAIAdapter extends BaseAdapter {
                     words: undefined,
                     timestamp: Date.now(),
                     channel: 'mic',
+                    speakerId,
                   })
                 );
               }
@@ -569,6 +586,7 @@ export class OpenAIAdapter extends BaseAdapter {
             const finalText = extractCompletedText(payload);
             if (finalText) {
               partialByItem.delete(itemId);
+              const speakerId = extractSpeaker(payload) ?? undefined;
               listeners.data.forEach((cb) =>
                 cb({
                   provider: 'openai',
@@ -577,6 +595,7 @@ export class OpenAIAdapter extends BaseAdapter {
                   words: undefined,
                   timestamp: Date.now(),
                   channel: 'mic',
+                  speakerId,
                 })
               );
             }

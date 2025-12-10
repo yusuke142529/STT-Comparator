@@ -15,6 +15,7 @@ export function useAudioOutputDevices() {
   const [devices, setDevices] = useState<AudioOutputDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selecting, setSelecting] = useState(false);
 
   const refresh = useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
@@ -63,5 +64,31 @@ export function useAudioOutputDevices() {
 
   const hasDevices = useMemo(() => devices.length > 0, [devices]);
 
-  return { devices, loading, error, hasDevices, refresh };
+  const requestSelectAudioOutput = useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
+      setError('ブラウザが出力デバイス選択に対応していません');
+      return false;
+    }
+    const mediaDevices = navigator.mediaDevices as MediaDevices & { selectAudioOutput?: () => Promise<MediaDeviceInfo> };
+    const selector = mediaDevices.selectAudioOutput;
+    if (typeof selector !== 'function') {
+      setError('このブラウザは出力デバイス選択 API に未対応です');
+      return false;
+    }
+    setSelecting(true);
+    try {
+      await selector.call(mediaDevices);
+      await refresh();
+      setError(null);
+      return true;
+    } catch (err) {
+      console.error('selectAudioOutput failed', err);
+      setError((err as DOMException)?.message ?? '出力デバイスの許可に失敗しました');
+      return false;
+    } finally {
+      setSelecting(false);
+    }
+  }, [refresh]);
+
+  return { devices, loading, error, hasDevices, refresh, requestSelectAudioOutput, selecting };
 }

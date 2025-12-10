@@ -79,12 +79,14 @@ interface DeepgramWord {
   end?: number;
   word?: string;
   confidence?: number;
+  speaker?: number | string;
 }
 
 interface DeepgramAlternative {
   transcript?: string;
   words?: DeepgramWord[];
   duration?: number;
+  speaker?: number | string;
 }
 
 interface DeepgramStreamingChannel {
@@ -301,6 +303,9 @@ export class DeepgramAdapter extends BaseAdapter {
     if (ENABLE_SMART_FORMAT) {
       query.set('smart_format', 'true');
     }
+    if (opts.enableDiarization) {
+      query.set('diarize', 'true');
+    }
     if (opts.enableInterim === false) {
       query.set('interim_results', 'false');
     }
@@ -341,6 +346,12 @@ export class DeepgramAdapter extends BaseAdapter {
         if (json.type === 'Results' && json.channel?.alternatives?.length) {
           const alt = json.channel.alternatives[0];
           const isFinal = Boolean(json.is_final ?? json.isFinal ?? (json as any).speech_final);
+          const speakerId =
+            typeof alt.speaker === 'number' || typeof alt.speaker === 'string'
+              ? String(alt.speaker)
+              : typeof alt.words?.[0]?.speaker === 'number' || typeof alt.words?.[0]?.speaker === 'string'
+                ? String(alt.words[0].speaker)
+                : undefined;
           const transcript: PartialTranscript = {
             provider: this.id,
             isFinal,
@@ -349,6 +360,7 @@ export class DeepgramAdapter extends BaseAdapter {
             confidence: typeof alt.confidence === 'number' ? alt.confidence : undefined,
             timestamp: Date.now(),
             channel: 'mic',
+            speakerId,
           };
           listeners.data.forEach((cb) => cb(transcript));
         } else if (json.type === 'Error') {

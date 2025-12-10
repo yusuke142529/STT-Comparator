@@ -47,6 +47,15 @@ const configSchema = z.object({
   ws: z
     .object({
       maxPcmQueueBytes: z.number().min(128 * 1024).max(100 * 1024 * 1024).default(5 * 1024 * 1024),
+      keepaliveMs: z.number().int().min(5_000).max(120_000).default(30_000),
+      maxMissedPongs: z.number().int().min(1).max(10).default(2),
+      meeting: z
+        .object({
+          maxPcmQueueBytes: z.number().int().min(128 * 1024).max(100 * 1024 * 1024).optional(),
+          overflowGraceMs: z.number().int().min(100).max(10_000).optional(),
+        })
+        .partial()
+        .default({}),
       compare: z
         .object({
           backlogSoft: z.number().int().min(1).max(10_000).default(8),

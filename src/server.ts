@@ -40,7 +40,7 @@ import type {
 } from './types.js';
 import type { ProviderAvailability } from './utils/providerStatus.js';
 import { ReplaySessionStore } from './replay/replaySessionStore.js';
-import type { RealtimeTranscriptStore } from './storage/realtimeTranscriptStore.js';
+import type { RealtimeTranscriptLogStore } from './storage/realtimeTranscriptStore.js';
 import { getBatchMaxBytes } from './utils/providerLimits.js';
 
 loadEnvironment();
@@ -63,6 +63,7 @@ interface StatusCodeError extends Error {
 interface ParsedBatchRequest {
   files: Express.Multer.File[];
   providers: ProviderId[];
+  provider?: ProviderId;
   lang: string;
   manifest?: EvaluationManifest;
   options?: TranscriptionOptions;
@@ -154,7 +155,7 @@ export function parseBatchRequest(
     }
   }
 
-  return { files, providers, lang, manifest, options };
+  return { files, providers, provider: providers[0], lang, manifest, options };
 }
 
 export function createRealtimeLatencyHandler(
@@ -175,7 +176,7 @@ export function createRealtimeLatencyHandler(
   };
 }
 
-export function createRealtimeLogSessionsHandler(store: RealtimeTranscriptStore) {
+export function createRealtimeLogSessionsHandler(store: RealtimeTranscriptLogStore) {
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     try {
       const raw = Number(req.query.limit ?? 20);
@@ -230,7 +231,11 @@ async function bootstrap() {
   } as const;
   const storage = createStorage(config.storage.driver, config.storage.path, retention);
   const realtimeLatencyStore = createRealtimeStorage(config.storage.driver, config.storage.path, retention);
-  const realtimeTranscriptLogStore = createRealtimeTranscriptStore(config.storage.path, retention);
+  const realtimeTranscriptLogStore = createRealtimeTranscriptStore(
+    config.storage.driver,
+    config.storage.path,
+    retention
+  );
   const previewStore = new PreviewStore();
   const replaySessionStore = new ReplaySessionStore();
   const jobHistory = new JobHistory(storage);

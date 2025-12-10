@@ -10,19 +10,24 @@ interface UseStreamSessionConfig {
   buildWsUrl: (path: 'stream' | 'stream-compare' | 'replay' | 'replay-multi', providers: string[], sessionId?: string) => string;
   retry: RetryController;
   onSessionClose?: () => void;
+  enableChannelSplit?: boolean;
 }
 
 const DEFAULT_SAMPLE_RATE = 16000;
 const OPENAI_SAMPLE_RATE = 24000;
 
-const buildAudioConstraints = (deviceId?: string, sampleRate: number = DEFAULT_SAMPLE_RATE): MediaTrackConstraints | boolean => {
+const buildAudioConstraints = (
+  deviceId?: string,
+  sampleRate: number = DEFAULT_SAMPLE_RATE,
+  channelSplit?: boolean
+): MediaTrackConstraints | boolean => {
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getSupportedConstraints) {
     return deviceId ? { deviceId: { exact: deviceId } } : true;
   }
   const supported = navigator.mediaDevices.getSupportedConstraints();
   const constraints: MediaTrackConstraints = {};
   if (deviceId) constraints.deviceId = { exact: deviceId };
-  if (supported.channelCount) constraints.channelCount = 1;
+  if (supported.channelCount) constraints.channelCount = channelSplit ? 2 : 1;
   if (supported.sampleRate) constraints.sampleRate = sampleRate;
   if (supported.sampleSize) constraints.sampleSize = 16;
   if (supported.echoCancellation) constraints.echoCancellation = false;
@@ -31,7 +36,15 @@ const buildAudioConstraints = (deviceId?: string, sampleRate: number = DEFAULT_S
   return Object.keys(constraints).length > 0 ? constraints : deviceId ? { deviceId: { exact: deviceId } } : true;
 };
 
-export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, buildWsUrl, retry, onSessionClose }: UseStreamSessionConfig) => {
+export const useStreamSession = ({
+  chunkMs,
+  apiBase,
+  buildStreamingConfig,
+  buildWsUrl,
+  retry,
+  onSessionClose,
+  enableChannelSplit,
+}: UseStreamSessionConfig) => {
   const [transcripts, setTranscripts] = useState<TranscriptRow[]>([]);
   const [latencies, setLatencies] = useState<number[]>([]);
   const [latenciesByProvider, setLatenciesByProvider] = useState<Record<string, number[]>>({});
@@ -98,6 +111,10 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
       const handleMessage = (event: MessageEvent<string>) => {
         try {
           const payload = JSON.parse(event.data) as WsPayload;
+          if (payload.type === 'ping') {
+            socket.send(JSON.stringify({ type: 'pong', ts: payload.ts ?? Date.now() }));
+            return;
+          }
           if (payload.type === 'session' && payload.sessionId) {
             setSessionId(payload.sessionId);
             retry.reset();
@@ -125,7 +142,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                 casingApplied: payload.casingApplied ?? null,
                 words: payload.words,
               };
-              windowMap.set(payload.provider, row);
+              windowMap.set(payload.provider!, row);
               map.set(windowId, windowMap);
               if (map.size > 600) {
                 const oldest = Math.min(...map.keys());
@@ -142,11 +159,12 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
             const channel = ((payload as { channel?: string }).channel ?? 'mic') as 'mic' | 'file';
             const isFinal = !!payload.isFinal;
             const provider = payload.provider || '';
+            const speakerId = payload.speakerId ? String(payload.speakerId) : undefined;
             const mergeWindowMs = Math.max(chunkMs * 2, 800);
 
             setTranscripts((prev) => {
               const next = [...prev];
-              const key = `${provider}|${channel}`;
+              const key = `${provider}|${channel}|${speakerId ?? 'none'}`;
               const currentInterimId = interimByChannelRef.current[key];
               const lastFinalId = lastFinalByChannelRef.current[key];
 
@@ -161,6 +179,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                     isFinal,
                     timestamp: payload.timestamp!,
                     latencyMs: payload.latencyMs,
+                    speakerId,
                     degraded: payload.degraded,
                   };
                   return true;
@@ -181,18 +200,23 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                     const row = next[idx];
                     const withinWindow = payload.timestamp! - row.timestamp <= mergeWindowMs;
                     const sameProvider = row.provider === provider;
+                    const sameSpeaker = row.speakerId === speakerId;
                     if (withinWindow && sameProvider) {
                       const separator = row.text.trim().length === 0 || row.text.endsWith(' ') ? '' : ' ';
                       next[idx] = {
                         ...row,
                         text: `${row.text}${separator}${payload.text!}`,
-                  timestamp: payload.timestamp!,
-                  latencyMs: payload.latencyMs ?? row.latencyMs,
-                  degraded: payload.degraded ?? row.degraded,
-                };
-                return next.slice(-100);
-              }
-            }
+                        timestamp: payload.timestamp!,
+                        latencyMs: payload.latencyMs ?? row.latencyMs,
+                        degraded: payload.degraded ?? row.degraded,
+                        speakerId: row.speakerId ?? speakerId,
+                      };
+                      // Avoid merging across speakers
+                      if (sameSpeaker || !speakerId || !row.speakerId) {
+                        return next.slice(-100);
+                      }
+                    }
+                  }
                 }
 
                 transcriptIdRef.current += 1;
@@ -205,6 +229,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                   isFinal: true,
                   timestamp: payload.timestamp!,
                   latencyMs: payload.latencyMs,
+                  speakerId,
                   degraded: payload.degraded,
                 });
                 interimByChannelRef.current[key] = null;
@@ -227,6 +252,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
                 isFinal: false,
                 timestamp: payload.timestamp!,
                 latencyMs: payload.latencyMs,
+                speakerId,
                 degraded: payload.degraded,
               });
               interimByChannelRef.current[key] = id;
@@ -298,6 +324,7 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
       stopMedia();
 
       let degraded = false;
+      const expectedChannels = enableChannelSplit ? 2 : 1;
       resetStreamState();
       retry.reset();
       setIsStreaming(true);
@@ -306,27 +333,31 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
 
       try {
         const targetSampleRate = pickTargetSampleRate(providers);
-        const audioConstraints = buildAudioConstraints(deviceId, targetSampleRate);
+        const audioConstraints = buildAudioConstraints(deviceId, targetSampleRate, enableChannelSplit);
         const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         streamRef.current = stream;
 
         const settings = stream.getAudioTracks()[0]?.getSettings() ?? {};
         const badSampleRate = typeof settings.sampleRate === 'number' && settings.sampleRate !== targetSampleRate;
-        const badChannels = typeof settings.channelCount === 'number' && settings.channelCount !== 1;
+        const expectedChannels = enableChannelSplit ? 2 : 1;
+        const badChannels =
+          typeof settings.channelCount === 'number' && settings.channelCount !== expectedChannels;
         const dspOn =
           settings.echoCancellation === true || settings.noiseSuppression === true || settings.autoGainControl === true;
         if (badSampleRate || badChannels || dspOn) {
           stream.getTracks().forEach((t) => t.stop());
           if (!allowDegraded) {
             setError(
-              `マイク設定が仕様と一致しません (${targetSampleRate / 1000}kHz/mono/エフェクトOFF)。ブラウザやOSのマイク設定を確認してください。`
+              `マイク設定が仕様と一致しません (${targetSampleRate / 1000}kHz/${expectedChannels === 1 ? 'mono' : 'stereo'}/エフェクトOFF)。ブラウザやOSのマイク設定を確認してください。`
             );
             setIsStreaming(false);
             return;
           }
           degraded = true;
           setWarning(
-            `品質低下モードで継続します: ${targetSampleRate / 1000}kHz/mono/エフェクトOFF を満たせませんでした。`
+            `品質低下モードで継続します: ${targetSampleRate / 1000}kHz/${
+              expectedChannels === 1 ? 'mono' : 'stereo'
+            }/エフェクトOFF を満たせませんでした。`
           );
           const retryStream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true });
           streamRef.current = retryStream;
@@ -363,16 +394,42 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
           numberOfOutputs: 0,
           processorOptions: {
             chunkSamples,
+            channelSplit: enableChannelSplit ?? false,
           },
         });
         workletNodeRef.current = worklet;
 
         const timeBaseMs = Date.now() - context.currentTime * 1000;
 
-        const sendPcmChunk = (payload: { seq: number; pcm: ArrayBuffer; durationMs: number; endTimeMs: number }) => {
+        const sendPcmChunk = (payload: {
+          seq: number;
+          pcm?: ArrayBuffer;
+          pcmLeft?: ArrayBuffer;
+          pcmRight?: ArrayBuffer;
+          durationMs: number;
+          endTimeMs: number;
+          channelSplit?: boolean;
+        }) => {
           const socket = wsRef.current;
           if (!socket || socket.readyState !== WebSocket.OPEN) return;
           const captureTs = timeBaseMs + payload.endTimeMs;
+          if (payload.channelSplit && payload.pcmLeft && payload.pcmRight) {
+            const frames: Array<{ seq: number; pcm: ArrayBuffer }> = [
+              { seq: payload.seq * 2, pcm: payload.pcmLeft },
+              { seq: payload.seq * 2 + 1, pcm: payload.pcmRight },
+            ];
+            frames.forEach((frame) => {
+              const packet = new ArrayBuffer(STREAM_HEADER_BYTES + frame.pcm.byteLength);
+              const view = new DataView(packet);
+              view.setUint32(0, frame.seq, true);
+              view.setFloat64(4, captureTs, true);
+              view.setFloat32(12, payload.durationMs, true);
+              new Uint8Array(packet, STREAM_HEADER_BYTES).set(new Uint8Array(frame.pcm));
+              socket.send(packet);
+            });
+            return;
+          }
+          if (!payload.pcm) return;
           const packet = new ArrayBuffer(STREAM_HEADER_BYTES + payload.pcm.byteLength);
           const view = new DataView(packet);
           view.setUint32(0, payload.seq, true);
@@ -383,7 +440,15 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
         };
 
         worklet.port.onmessage = (event: MessageEvent) => {
-          const data = event.data as { seq: number; pcm: ArrayBuffer; durationMs: number; endTimeMs: number };
+          const data = event.data as {
+            seq: number;
+            pcm?: ArrayBuffer;
+            pcmLeft?: ArrayBuffer;
+            pcmRight?: ArrayBuffer;
+            durationMs: number;
+            endTimeMs: number;
+            channelSplit?: boolean;
+          };
           sendPcmChunk(data);
         };
 
@@ -406,6 +471,8 @@ export const useStreamSession = ({ chunkMs, apiBase, buildStreamingConfig, build
               pcm: true,
               degraded,
               clientSampleRate: context.sampleRate,
+              channelSplit: enableChannelSplit ?? false,
+              channels: expectedChannels,
             })
           );
           source.connect(worklet);

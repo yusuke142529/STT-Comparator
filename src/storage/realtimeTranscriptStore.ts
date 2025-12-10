@@ -2,11 +2,16 @@ import { JsonlStore } from './jsonlStore.js';
 import type { RetentionPolicy } from './retention.js';
 import type { RealtimeTranscriptLogEntry, RealtimeTranscriptSessionSummary } from '../types.js';
 
-export interface RealtimeTranscriptLogWriter {
+export interface RealtimeTranscriptLogStore {
+  init(): Promise<void>;
   append(entry: RealtimeTranscriptLogEntry): Promise<void>;
+  readSession(sessionId: string): Promise<RealtimeTranscriptLogEntry[]>;
+  listSessions(limit?: number): Promise<RealtimeTranscriptSessionSummary[]>;
 }
 
-export class RealtimeTranscriptStore implements RealtimeTranscriptLogWriter {
+export type RealtimeTranscriptLogWriter = RealtimeTranscriptLogStore;
+
+export class RealtimeTranscriptStore implements RealtimeTranscriptLogStore {
   private readonly store: JsonlStore<RealtimeTranscriptLogEntry>;
 
   constructor(filepath: string, retention?: RetentionPolicy) {

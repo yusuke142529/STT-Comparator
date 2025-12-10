@@ -732,6 +732,12 @@ select:focus, input:focus, textarea:focus {
   border: 1px solid currentColor;
 }
 
+.bubble-badge.speaker {
+  color: #0b5ed7;
+  background: rgba(13, 110, 253, 0.08);
+  border-color: rgba(13, 110, 253, 0.35);
+}
+
 .bubble-badge.degraded {
   color: #9a3412;
   background: #fff7ed;

@@ -6,6 +6,7 @@ export interface TranscriptRow {
   isFinal: boolean;
   timestamp: number;
   latencyMs?: number;
+  speakerId?: string;
   degraded?: boolean;
 }
 
@@ -86,6 +87,7 @@ export interface ProviderInfo {
   supportsDictionaryPhrases?: boolean;
   supportsPunctuationPolicy?: boolean;
   supportsContextPhrases?: boolean;
+  supportsDiarization?: boolean;
 }
 
 export interface FileResult {
@@ -134,6 +136,7 @@ export interface RealtimeLogPayloadTranscript {
   timestamp: number;
   channel: 'mic' | 'file';
   latencyMs?: number;
+  speakerId?: string;
   words?: TranscriptWord[];
   confidence?: number;
 }
@@ -174,7 +177,7 @@ export interface RealtimeLogSession {
 }
 
 export interface WsPayload {
-  type: 'session' | 'transcript' | 'normalized' | 'error';
+  type: 'session' | 'transcript' | 'normalized' | 'error' | 'ping';
   sessionId?: string;
   latencyMs?: number;
   message?: string;
@@ -190,6 +193,7 @@ export interface WsPayload {
   windowEndMs?: number;
   textRaw?: string;
   textNorm?: string;
+  textDelta?: string;
   revision?: number;
   originCaptureTs?: number;
   confidence?: number | null;
@@ -197,6 +201,8 @@ export interface WsPayload {
   casingApplied?: boolean | null;
   words?: TranscriptWord[];
   channel?: 'mic' | 'file';
+  speakerId?: string;
+  ts?: number;
 }
 
 export type PunctuationPolicy = 'none' | 'basic' | 'full';

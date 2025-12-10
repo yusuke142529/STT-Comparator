@@ -44,6 +44,11 @@ interface ControlPanelProps {
   setEnableInterim: (value: boolean) => void;
   enableVad: boolean;
   setEnableVad: (value: boolean) => void;
+  enableDiarization: boolean;
+  setEnableDiarization: (value: boolean) => void;
+  enableChannelSplit: boolean;
+  setEnableChannelSplit: (value: boolean) => void;
+  supportsDiarization: boolean;
   allowDegraded: boolean;
   setAllowDegraded: (value: boolean) => void;
   replayFile: File | null;
@@ -66,6 +71,8 @@ interface ControlPanelProps {
   audioOutputDevicesError: string | null;
   hasAudioOutputDevices: boolean;
   refreshAudioOutputDevices: () => void;
+  requestSelectAudioOutput: () => Promise<boolean>;
+  selectingAudioOutput: boolean;
   selectedOutputDeviceId: string | null;
   setSelectedOutputDeviceId: (value: string | null) => void;
   isReplayAudioMuted: boolean;
@@ -106,6 +113,11 @@ export const ControlPanel = memo(({
   setEnableInterim,
   enableVad,
   setEnableVad,
+  enableDiarization,
+  setEnableDiarization,
+  enableChannelSplit,
+  setEnableChannelSplit,
+  supportsDiarization,
   allowDegraded,
   setAllowDegraded,
   replayFile,
@@ -127,6 +139,8 @@ export const ControlPanel = memo(({
   audioOutputDevicesError,
   hasAudioOutputDevices,
   refreshAudioOutputDevices,
+  requestSelectAudioOutput,
+  selectingAudioOutput,
   selectedOutputDeviceId,
   setSelectedOutputDeviceId,
   isReplayAudioMuted,
@@ -325,6 +339,15 @@ export const ControlPanel = memo(({
                       >
                         <Icons.Refresh /> 更新
                       </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => void requestSelectAudioOutput()}
+                        disabled={audioOutputDevicesLoading || selectingAudioOutput}
+                        style={{ whiteSpace: 'nowrap' }}
+                      >
+                        <Icons.Monitor /> 出力デバイス許可
+                      </button>
                     </div>
                     <ToggleSwitch
                       label="音声プレビュー"
@@ -334,7 +357,9 @@ export const ControlPanel = memo(({
                     <p className="helper-text">
                       {sinkSelectionSupported
                         ? hasAudioOutputDevices
-                          ? '複数の再生デバイスがある場合はここから切り替え可能です。'
+                          ? audioOutputDevices.length <= 1
+                            ? '選択肢が1件のみの場合、ブラウザが既定デバイスしか列挙していません。マイク権限を許可するか「出力デバイス許可」ボタンを押して再取得してください。'
+                            : '複数の再生デバイスがある場合はここから切り替え可能です。'
                           : '出力候補がありません。OS/ブラウザ側の設定でデバイスを確認してください。'
                         : 'このブラウザでは再生先の切り替えに対応していません（HTTPS + 対応ブラウザが必要）。'}
                     </p>
@@ -422,12 +447,41 @@ export const ControlPanel = memo(({
             <ToggleSwitch label="途中経過を出力" checked={enableInterim} onChange={setEnableInterim} />
             <ToggleSwitch label="VAD を有効化" checked={enableVad} onChange={setEnableVad} />
             <ToggleSwitch
+              label="話者分離（対応プロバイダ）"
+              checked={enableDiarization && supportsDiarization}
+              disabled={!supportsDiarization}
+              onChange={setEnableDiarization}
+              helperText={supportsDiarization ? undefined : 'このプロバイダは話者分離に対応していません'}
+            />
+            <ToggleSwitch
+              label="チャネル分離を試す (L/R を別話者扱い)"
+              checked={enableChannelSplit}
+              onChange={setEnableChannelSplit}
+              helperText="ステレオ入力の左右チャンネルをそのまま送信し、話者ID=L/Rとして表示します"
+            />
+            <ToggleSwitch
               label="品質低下モードを許可 (16kHz/mono未満でも続行)"
               checked={allowDegraded}
               onChange={setAllowDegraded}
             />
+            <button
+              type="button"
+              className="button subtle"
+              onClick={() => {
+                setEnableInterim(true);
+                setEnableVad(true);
+                setEnableDiarization(supportsDiarization);
+                setEnableChannelSplit(true);
+                setAllowDegraded(false);
+              }}
+            >
+              会議モード推奨設定を適用
+            </button>
           </div>
-          <p className="helper-text">録音/再生は画面下部のフローティングボタンから操作できます。</p>
+          <p className="helper-text">
+            録音/再生は画面下部のフローティングボタンから操作できます。macOS + Google Meet では BlackHole/Loopback などの仮想デバイスで
+            会議出力をマイク入力にミラーすると「相手＋自分」の音声をまとめて文字起こしできます。
+          </p>
         </div>
       </article>
     </section>

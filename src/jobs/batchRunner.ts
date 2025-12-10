@@ -324,7 +324,7 @@ export class BatchRunner {
     const processingTimeMs = Date.now() - start; // server-measured wall clock
     const computedDuration =
       pcmBuffer.length / (2 * config.audio.targetChannels * providerSampleRate);
-    const durationSec = batchResult.durationSec ?? computedDuration ?? prepared.durationSec;
+    const durationSec = batchResult.durationSec ?? prepared.durationSec ?? computedDuration;
 
     const normalization = job.normalization ?? config.normalization;
     if (normalization?.stripSpace) {

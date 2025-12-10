@@ -39,6 +39,7 @@ export const TranscriptViewer = memo(({ transcripts, containerRef, showJumpButto
             <div className="bubble-meta">
               <span>{new Date(row.timestamp).toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' })}</span>
               <span className="bubble-latency">{row.latencyMs ? `${row.latencyMs}ms` : ''}</span>
+              {row.speakerId && <span className="bubble-badge speaker">{row.speakerId}</span>}
               {row.degraded && <span className="bubble-badge degraded">Degraded</span>}
             </div>
             <p className="bubble-text">{row.text}</p>
