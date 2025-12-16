@@ -1,36 +1,22 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
 /* eslint-disable max-classes-per-file */
 
 const TARGET_BITS_PER_SAMPLE = 16;
 
-type ProcessorOptions = {
-  chunkSamples: number;
-  channelSplit?: boolean;
-};
-
 class PcmWorkletProcessor extends AudioWorkletProcessor {
-  private readonly chunkSamples: number;
-  private readonly channelSplit: boolean;
-  private buffer: Float32Array;
-  private leftBuffer: Float32Array | null = null;
-  private rightBuffer: Float32Array | null = null;
-  private pendingSamples = 0;
-  private seq = 0;
-  private totalSamples = 0;
-
-  constructor(options: AudioWorkletNodeOptions) {
+  constructor(options) {
     super();
-    const opts = (options.processorOptions || {}) as ProcessorOptions;
+    const opts = (options?.processorOptions ?? {});
     this.chunkSamples = Math.max(1, Math.trunc(opts.chunkSamples ?? 4000));
     this.channelSplit = !!opts.channelSplit;
     this.buffer = new Float32Array(this.chunkSamples * 2);
-    if (this.channelSplit) {
-      this.leftBuffer = new Float32Array(this.chunkSamples * 2);
-      this.rightBuffer = new Float32Array(this.chunkSamples * 2);
-    }
+    this.leftBuffer = this.channelSplit ? new Float32Array(this.chunkSamples * 2) : null;
+    this.rightBuffer = this.channelSplit ? new Float32Array(this.chunkSamples * 2) : null;
+    this.pendingSamples = 0;
+    this.seq = 0;
+    this.totalSamples = 0;
   }
 
-  private ensureCapacity(nextNeeded: number) {
+  ensureCapacity(nextNeeded) {
     if (nextNeeded <= this.buffer.length) return;
     const next = new Float32Array(nextNeeded * 2);
     next.set(this.buffer.subarray(0, this.pendingSamples));
@@ -45,7 +31,7 @@ class PcmWorkletProcessor extends AudioWorkletProcessor {
     }
   }
 
-  process(inputs: Float32Array[][]): boolean {
+  process(inputs) {
     const input = inputs[0];
     if (!input || input.length === 0) {
       return true;
@@ -150,13 +136,3 @@ class PcmWorkletProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor('pcm-worklet', PcmWorkletProcessor);
-/// <reference lib="webworker" />
-
-declare const sampleRate: number;
-declare function registerProcessor(name: string, processorCtor: typeof AudioWorkletProcessor): void;
-
-declare abstract class AudioWorkletProcessor {
-  readonly port: MessagePort;
-  constructor(options?: unknown);
-  abstract process(inputs: Float32Array[][], outputs: Float32Array[][], parameters: Record<string, Float32Array>): boolean;
-}

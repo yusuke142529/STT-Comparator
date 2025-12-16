@@ -535,18 +535,24 @@ export class DeepgramAdapter extends BaseAdapter {
 
   private parseBatchResult(json: DeepgramBatchResponse): BatchResult {
     const alt = findFirstDeepgramAlternative(json);
-    const durationSec = json.metadata?.duration ?? alt?.duration ?? 0;
+    const durationRaw = json.metadata?.duration ?? alt?.duration;
+    const durationSec =
+      typeof durationRaw === 'number' && Number.isFinite(durationRaw) && durationRaw > 0
+        ? durationRaw
+        : undefined;
     const segments = extractDeepgramTranscripts(json);
     const transcriptText = segments.join(' ').trim();
-    const vendorMs =
-      (json.metadata?.processing_ms ?? json.metadata?.processing_time) ?? 0;
-    const vendorProcessingMs = Number.isFinite(vendorMs) ? Math.round(vendorMs) : 0;
+    const vendorMs = json.metadata?.processing_ms ?? json.metadata?.processing_time;
+    const vendorProcessingMs =
+      typeof vendorMs === 'number' && Number.isFinite(vendorMs) && vendorMs > 0
+        ? Math.round(vendorMs)
+        : undefined;
     return {
       provider: this.id,
       text: transcriptText,
       words: alt?.words?.map(mapDeepgramWord),
       durationSec,
-      vendorProcessingMs: Number.isFinite(vendorProcessingMs) ? vendorProcessingMs : undefined,
+      vendorProcessingMs,
     };
   }
 }

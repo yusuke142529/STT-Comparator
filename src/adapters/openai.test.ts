@@ -40,20 +40,21 @@ describe('OpenAIAdapter streaming', () => {
     wsState.instances.length = 0;
   });
 
-  it('passes diarization flag and surfaces speakerId from events', async () => {
+  it('builds prompt from context/dictionary and surfaces speakerId from events', async () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({
       language: 'en',
       sampleRateHz: 16000,
       encoding: 'linear16',
-      enableDiarization: true,
+      contextPhrases: ['alpha', 'beta'],
+      dictionaryPhrases: ['beta', 'gamma'],
     });
 
     const ws = wsState.instances[0];
     await new Promise((r) => setTimeout(r, 10));
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
-    expect(parsed.session?.input_audio_transcription?.diarization).toBe(true);
+    expect(parsed.session?.input_audio_transcription?.prompt).toBe('alpha, beta, gamma');
 
     const seen: Array<{ text: string; speakerId?: string }> = [];
     session.onData((t) => seen.push({ text: t.text, speakerId: t.speakerId }));

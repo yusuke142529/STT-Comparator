@@ -15,6 +15,7 @@ import { logger } from '../logger.js';
 const OPENAI_DEBUG = process.env.OPENAI_DEBUG === 'true';
 const OPENAI_PING_INTERVAL_MS = 15_000;
 const OPENAI_MANUAL_COMMIT_INTERVAL_MS = 1_000;
+const OPENAI_STREAM_BUFFER_HIGH_WATER_BYTES = 5 * 1024 * 1024;
 
 // Realtime transcription currently supports: whisper-1, gpt-4o-transcribe, gpt-4o-mini-transcribe.
 const DEFAULT_STREAMING_MODEL = process.env.OPENAI_STREAMING_MODEL ?? 'gpt-4o-transcribe';
@@ -410,7 +411,6 @@ export class OpenAIAdapter extends BaseAdapter {
     const sourceSampleRate = opts.sampleRateHz ?? 16_000;
     const allowInterim = opts.enableInterim !== false;
     const serverVadEnabled = opts.enableVad !== false;
-    const enableDiarization = opts.enableDiarization === true;
 
     if (!Number.isFinite(sourceSampleRate) || sourceSampleRate <= 0) {
       throw new Error(`invalid sampleRateHz: ${sourceSampleRate}`);
@@ -467,6 +467,13 @@ export class OpenAIAdapter extends BaseAdapter {
     const minBufferedMs = 100;
     const minBufferedBytes = Math.ceil((RESAMPLED_SAMPLE_RATE * 2 * minBufferedMs) / 1000); // mono 16-bit
 
+    const buildPrompt = () => {
+      const pieces = [...(opts.contextPhrases ?? []), ...(opts.dictionaryPhrases ?? [])]
+        .map((value) => value.trim())
+        .filter(Boolean);
+      return Array.from(new Set(pieces)).join(', ');
+    };
+
     const wsReady = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         try {
@@ -480,14 +487,14 @@ export class OpenAIAdapter extends BaseAdapter {
       ws.once('open', () => {
         clearTimeout(timer);
 
+        const prompt = buildPrompt();
         const session = {
           input_audio_format: 'pcm16' as const, // 24k mono PCM @ 16-bit
           input_audio_noise_reduction: { type: 'near_field' as const },
           input_audio_transcription: {
             model,
             language: language ?? '',
-            prompt: opts.dictionaryPhrases?.join(', ') ?? '',
-            diarization: enableDiarization ? true : undefined,
+            prompt,
           },
           turn_detection: serverVadEnabled
             ? {
@@ -519,6 +526,7 @@ export class OpenAIAdapter extends BaseAdapter {
         reject(new Error('openai realtime socket closed before ready'));
       });
     });
+    void wsReady.catch(() => undefined);
 
     const commitBuffer = async (force = false) => {
       if (!hasBufferedAudio) return;
@@ -689,8 +697,12 @@ export class OpenAIAdapter extends BaseAdapter {
         const resampled = resampler.resample(pcm);
         if (resampled.length === 0) return;
 
-        hasBufferedAudio = true;
-        bufferedBytes += resampled.length;
+        while (ws.bufferedAmount > OPENAI_STREAM_BUFFER_HIGH_WATER_BYTES) {
+          if (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
 
         ws.send(
           JSON.stringify({
@@ -698,6 +710,9 @@ export class OpenAIAdapter extends BaseAdapter {
             audio: resampled.toString('base64'),
           })
         );
+
+        hasBufferedAudio = true;
+        bufferedBytes += resampled.length;
 
         scheduleManualCommit();
       },

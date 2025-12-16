@@ -586,6 +586,45 @@ select:focus, input:focus, textarea:focus {
   margin-top: 4rem;
 }
 
+.voice-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
+.voice-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  align-items: stretch;
+}
+
+.voice-bubble {
+  max-width: min(760px, 92%);
+  padding: 0.85rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(15, 23, 42, 0.03);
+  box-shadow: var(--shadow-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.voice-bubble.user {
+  align-self: flex-end;
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+.voice-bubble.assistant {
+  align-self: flex-start;
+}
+
+.voice-interim {
+  opacity: 0.75;
+}
+
 /* Source Selection Pills */
 .source-toggle {
   display: grid;

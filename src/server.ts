@@ -12,6 +12,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { handleStreamConnection } from './ws/streamHandler.js';
 import { handleCompareStreamConnection } from './ws/compareStreamHandler.js';
 import { handleReplayConnection, handleReplayMultiConnection } from './ws/replayHandler.js';
+import { handleVoiceConnection } from './ws/voiceHandler.js';
+import { getOpenAiChatUrl } from './voice/openaiChat.js';
 import { logger } from './logger.js';
 import { createRealtimeStorage, createRealtimeTranscriptStore, createStorage } from './storage/index.js';
 import { loadConfig, reloadConfig } from './config.js';
@@ -425,6 +427,23 @@ async function bootstrap() {
     }
   });
 
+  app.get('/api/voice/status', (_req, res) => {
+    const missing: string[] = [];
+    if (!process.env.ELEVENLABS_API_KEY) missing.push('ELEVENLABS_API_KEY');
+    if (!process.env.ELEVENLABS_TTS_VOICE_ID) missing.push('ELEVENLABS_TTS_VOICE_ID');
+    if (!process.env.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
+    try {
+      getOpenAiChatUrl();
+    } catch {
+      missing.push('OPENAI_CHAT_URL');
+    }
+    res.json({
+      available: missing.length === 0,
+      missing,
+      providers: { stt: 'elevenlabs', tts: 'elevenlabs', llm: 'openai' },
+    });
+  });
+
   app.post('/api/realtime/preview', upload.single('file'), async (req, res, next) => {
     let normalization: Awaited<ReturnType<typeof ensureNormalizedAudio>> | null = null;
     try {
@@ -784,6 +803,45 @@ async function bootstrap() {
       });
   });
 
+  const voiceWss = new WebSocketServer({ noServer: true });
+
+  voiceWss.on('connection', (ws, req) => {
+    const url = new URL(req.url ?? '', 'http://localhost');
+    const lang = url.searchParams.get('lang') ?? 'ja-JP';
+    const origin = req.headers.origin;
+    const allowedOrigins = parseAllowedOrigins();
+    const sendWsError = (message: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'error', message }));
+      }
+      ws.close();
+    };
+
+    if (!isOriginAllowed(origin, allowedOrigins)) {
+      sendWsError('origin not allowed');
+      return;
+    }
+
+    const missing: string[] = [];
+    if (!process.env.ELEVENLABS_API_KEY) missing.push('ELEVENLABS_API_KEY');
+    if (!process.env.ELEVENLABS_TTS_VOICE_ID) missing.push('ELEVENLABS_TTS_VOICE_ID');
+    if (!process.env.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
+    try {
+      getOpenAiChatUrl();
+    } catch {
+      missing.push('OPENAI_CHAT_URL');
+    }
+    if (missing.length > 0) {
+      sendWsError(`voice agent unavailable: missing ${missing.join(', ')}`);
+      return;
+    }
+
+    void handleVoiceConnection(ws, lang).catch((error) => {
+      logger.error({ event: 'ws_voice_error', message: error.message });
+      sendWsError(error.message ?? 'voice handler error');
+    });
+  });
+
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '', 'http://localhost');
     if (url.pathname === '/ws/stream') {
@@ -796,6 +854,10 @@ async function bootstrap() {
     }
     if (url.pathname === '/ws/replay') {
       replayWss.handleUpgrade(req, socket, head, (ws) => replayWss.emit('connection', ws, req));
+      return;
+    }
+    if (url.pathname === '/ws/voice') {
+      voiceWss.handleUpgrade(req, socket, head, (ws) => voiceWss.emit('connection', ws, req));
       return;
     }
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');

@@ -149,9 +149,10 @@ const buildPcmFrame = (seq: number, captureTs: number) => {
   return frame;
 };
 
-const flushMicrotasks = async () => {
-  await Promise.resolve();
-  await Promise.resolve();
+const flushMicrotasks = async (max = 10) => {
+  for (let i = 0; i < max; i += 1) {
+    await Promise.resolve();
+  }
 };
 
 afterEach(() => {
@@ -181,8 +182,8 @@ describe('handleCompareStreamConnection', () => {
     );
     await flushMicrotasks();
     ws.emit('message', buildPcmFrame(1, Date.now()), true);
-
-    await Promise.resolve();
+    await flushMicrotasks();
+    await flushMicrotasks();
 
     expect(state.providers.deepgram.controller.sendAudio).toHaveBeenCalledTimes(1);
     expect(state.providers.mock.controller.sendAudio).toHaveBeenCalledTimes(1);
@@ -282,6 +283,7 @@ describe('handleCompareStreamConnection', () => {
     const captureEarly = Date.now() - 100;
     ws.emit('message', buildPcmFrame(1, captureEarly), true);
     await flushMicrotasks();
+    await flushMicrotasks();
 
     state.providers.mock.getOnData()?.({
       provider: 'mock',
@@ -293,6 +295,7 @@ describe('handleCompareStreamConnection', () => {
 
     const captureLate = Date.now() - 20;
     ws.emit('message', buildPcmFrame(2, captureLate), true);
+    await flushMicrotasks();
     await flushMicrotasks();
 
     state.providers.deepgram.getOnData()?.({
@@ -317,6 +320,33 @@ describe('handleCompareStreamConnection', () => {
     expect(transcripts.deepgram).toBeLessThan(120);
   });
 
+  it('rejects channelSplit config in compare mode and logs error per provider', async () => {
+    const logStore: RealtimeTranscriptLogWriter = {
+      append: vi.fn(async () => {}),
+    };
+    const { handleCompareStreamConnection } = await import('./compareStreamHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleCompareStreamConnection(ws as any, ['mock', 'deepgram'], 'ja-JP', noopStore, logStore);
+
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, channelSplit: true })),
+      false
+    );
+    await flushMicrotasks();
+
+    expect(ws.closed).toBe(true);
+    expect(state.providers.mock.controller.sendAudio).not.toHaveBeenCalled();
+    expect(state.providers.deepgram.controller.sendAudio).not.toHaveBeenCalled();
+
+    const calls = (logStore.append as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([entry]) => entry as RealtimeTranscriptLogEntry
+    );
+    const errors = calls.filter((c) => c.payload.type === 'error');
+    expect(errors.map((e) => e.provider).sort()).toEqual(['deepgram', 'mock']);
+  });
+
   it('suppresses transcripts after a provider fails and closes its controller', async () => {
     const { handleCompareStreamConnection } = await import('./compareStreamHandler.js');
     const ws = new FakeWebSocket();
@@ -333,6 +363,7 @@ describe('handleCompareStreamConnection', () => {
     );
     await flushMicrotasks();
     ws.emit('message', buildPcmFrame(1, Date.now()), true);
+    await flushMicrotasks();
     await flushMicrotasks();
     await flushMicrotasks();
 
@@ -421,6 +452,7 @@ describe('handleCompareStreamConnection', () => {
       Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
       false
     );
+    await flushMicrotasks();
 
     expect(state.providers.openai.startOpts?.sampleRateHz).toBe(24_000);
     expect(state.providers.deepgram.startOpts?.sampleRateHz).toBe(16_000);

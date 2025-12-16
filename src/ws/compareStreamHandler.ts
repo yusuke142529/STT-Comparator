@@ -1,4 +1,4 @@
-import type { WebSocket, RawData } from 'ws';
+import { WebSocket, type RawData } from 'ws';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { getAdapter } from '../adapters/index.js';
@@ -90,6 +90,17 @@ export async function handleCompareStreamConnection(
   });
   // Expose for tests/diagnostics without affecting runtime behavior.
   Reflect.set(ws as Record<string, unknown>, '__compareClosePromise', closePromise);
+  let messageChain: Promise<void> = Promise.resolve();
+
+  const sanitizeCaptureTs = (candidate: number, fallback: number) => {
+    if (!Number.isFinite(candidate) || candidate <= 0) return fallback;
+    const now = Date.now();
+    return candidate > now ? now : candidate;
+  };
+  const sanitizeDurationMs = (candidate: number, fallback: number) => {
+    if (!Number.isFinite(candidate) || candidate <= 0) return fallback;
+    return Math.min(candidate, 5_000);
+  };
 
   const ensureTranscoder = () => {
     if (expectsPcm) return null;
@@ -123,6 +134,12 @@ export async function handleCompareStreamConnection(
       .catch((error) => logger.error({ event: 'realtime_log_error', message: error.message }));
   };
 
+  const recordFatalForAllProviders = (message: string) => {
+    for (const provider of providers) {
+      recordLog(provider, { type: 'error', message, provider });
+    }
+  };
+
   const buildTranscriptSignature = (provider: ProviderId, payload: StreamTranscriptMessage): string =>
     `${provider}:${payload.channel}:${payload.speakerId ?? 'unknown'}:${payload.isFinal ? 'final' : 'interim'}:${payload.text}`;
 
@@ -150,9 +167,10 @@ export async function handleCompareStreamConnection(
   const closeSession = (provider: ProviderId, session: ProviderSession) => {
     if (session.closed) return;
     session.closed = true;
+    session.resampler?.end();
+    session.resampler = null;
     session.cleanupPromise = (async () => {
       try {
-        await session.pending?.catch(() => undefined);
         await session.controller.end().catch(() => undefined);
       } catch (error) {
         logger.warn({ event: 'provider_end_error', provider, message: (error as Error).message });
@@ -165,6 +183,7 @@ export async function handleCompareStreamConnection(
       // Reset pending to a resolved promise so future fanout chains do not await stale errors.
       session.pending = Promise.resolve();
       session.pendingCount = 0;
+      session.droppedMs = 0;
     })();
   };
 
@@ -283,6 +302,11 @@ export async function handleCompareStreamConnection(
       clearInterval(keepaliveTimer);
       keepaliveTimer = null;
     }
+    const allSessionsFailed =
+      sessions.size > 0 && [...sessions.values()].every((session) => session.failed);
+    if (!allSessionsFailed) {
+      recordFatalForAllProviders(err.message);
+    }
     sendJson({ type: 'error', message: err.message } as StreamErrorMessage);
     for (const session of sessions.values()) {
       session.resampler?.end();
@@ -292,20 +316,24 @@ export async function handleCompareStreamConnection(
   }
 
   ws.on('message', (data, isBinary) => {
-    void (async () => {
-      if (!isBinary) {
-        try {
-          const parsed = JSON.parse(data.toString()) as { type?: string };
-          if (parsed?.type === 'pong') {
-            missedPongs = 0;
-            return;
-          }
-        } catch {
-          // ignore control frames
+    if (!isBinary) {
+      try {
+        const parsed = JSON.parse(data.toString()) as { type?: string };
+        if (parsed?.type === 'pong') {
+          missedPongs = 0;
+          return;
         }
+      } catch {
+        // ignore control frames
       }
+    }
+
+    const run = async () => {
+      if (closed) return;
       if (!sessionStarted && isBinary) {
-        sendJson({ type: 'error', message: 'config message required before audio' } as StreamErrorMessage);
+        const message = 'config message required before audio';
+        recordFatalForAllProviders(message);
+        sendJson({ type: 'error', message } as StreamErrorMessage);
         transcoder?.end();
         ws.close();
         return;
@@ -318,6 +346,14 @@ export async function handleCompareStreamConnection(
           sessionStarted = true;
           expectsPcm = !!configMsg.pcm;
           sessionDegraded = !!configMsg.degraded;
+          if (configMsg.channelSplit === true || configMsg.options?.enableChannelSplit === true) {
+            const message = 'channelSplit is not supported in compare mode; disable it or use single-provider streaming';
+            recordFatalForAllProviders(message);
+            sendJson({ type: 'error', message } as StreamErrorMessage);
+            transcoder?.end();
+            ws.close();
+            return;
+          }
           const isMeetingMode = configMsg.options?.meetingMode === true;
           if (isMeetingMode && config.ws?.meeting) {
             maxQueueBytes = config.ws.meeting.maxPcmQueueBytes ?? maxQueueBytes;
@@ -425,18 +461,20 @@ export async function handleCompareStreamConnection(
                   session.firstSentAt ??
                   Date.now();
 
-                const latencyMs = Date.now() - originCaptureTs;
+                const rawLatencyMs = Date.now() - originCaptureTs;
+                const latencyMs =
+                  Number.isFinite(rawLatencyMs) && rawLatencyMs >= 0 ? rawLatencyMs : undefined;
                 const payload: StreamTranscriptMessage = {
                   type: 'transcript',
                   ...transcript,
                   provider: transcript.provider ?? id,
                   channel: transcript.channel ?? 'mic',
                   latencyMs,
-                  originCaptureTs: originCaptureTs ?? undefined,
+                  originCaptureTs: Number.isFinite(originCaptureTs) ? originCaptureTs : undefined,
                   degraded: sessionDegraded || transcript.degraded,
                 };
                 if (!shouldEmitTranscript(id, payload)) return;
-                if (typeof latencyMs === 'number') providerSession.latencies.push(latencyMs);
+                if (payload.isFinal && latencyMs !== undefined) providerSession.latencies.push(latencyMs);
                 const normalized = normalizer?.ingest(id, {
                   provider: id,
                   isFinal: payload.isFinal,
@@ -497,6 +535,7 @@ export async function handleCompareStreamConnection(
           return;
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Invalid initial config message';
+          recordFatalForAllProviders(message);
           sendJson({ type: 'error', message } as StreamErrorMessage);
           transcoder?.end();
           ws.close();
@@ -504,25 +543,29 @@ export async function handleCompareStreamConnection(
         }
       }
 
-      if (isBinary) {
-        const buffer = normalizeRawData(data);
-        if (expectsPcm) {
-          try {
-            const { header, pcm } = parseStreamFrame(buffer);
-            await flushChunk(pcm, {
-              captureTs: header.captureTs,
-              durationMs: header.durationMs || chunkDurationMs,
-              seq: header.seq,
-            });
-            return;
-          } catch (err) {
-            return handleFatal(err as Error);
-          }
+      if (!isBinary) return;
+
+      const buffer = normalizeRawData(data);
+      if (expectsPcm) {
+        try {
+          const { header, pcm } = parseStreamFrame(buffer);
+          const baseDuration = chunkDurationMs;
+          const captureTs = sanitizeCaptureTs(header.captureTs, Date.now());
+          const durationMs = sanitizeDurationMs(header.durationMs || baseDuration, baseDuration);
+          await flushChunk(pcm, { captureTs, durationMs, seq: header.seq });
+          return;
+        } catch (err) {
+          handleFatal(err as Error);
+          return;
         }
-        const activeTranscoder = ensureTranscoder();
-        await activeTranscoder?.input(buffer);
       }
-    })();
+
+      const activeTranscoder = ensureTranscoder();
+      await activeTranscoder?.input(buffer);
+    };
+
+    if (closed) return;
+    messageChain = messageChain.then(run).catch((err) => handleFatal(err as Error));
   });
 
   ws.on('close', () => {
@@ -540,7 +583,6 @@ export async function handleCompareStreamConnection(
             closeSession(provider, session);
           }
           await session.cleanupPromise?.catch(() => undefined);
-          await session.pending?.catch(() => undefined);
         }
 
         await Promise.all(

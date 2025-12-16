@@ -10,6 +10,7 @@
 - **Audio**: FFmpeg（`@ffmpeg-installer/ffmpeg`）で webm/opus → PCM (16k mono linear16)。アップロード音源もサーバ側で必ず 16k mono PCM WAV に正規化し、デコードエラーや極端に短い/壊れたファイルは 400 で即時拒否します。
 - **Scoring**: 独自 CER/WER/RTF 実装、正規化プリセット
 - **Storage**: JSONL 永続化（SQLite ドライバも実装済み; storage.driver で切替）
+- **Voice Agent（音声会話）**: ElevenLabs（STT/TTS）+ OpenAI（LLM）。割り込み（barge-in）対応。
 
 ## 主要ディレクトリ
 
@@ -50,6 +51,17 @@
   - `ELEVENLABS_BATCH_BASE_DELAY_MS` / `ELEVENLABS_BATCH_MAX_DELAY_MS`: 再試行間隔の指数バックオフを制御します（既定 1000ms / 5000ms）。
 必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。
   - `providerHealth.refreshMs` で `/api/providers` のヘルスチェック結果のキャッシュ期間（ミリ秒）を調整できます。デフォルト 5000ms により、`whisper_streaming` などのローカル ASR サービスを起動した直後でも UI が利用可能に切り替えられ、必要があれば `/api/admin/reload-config` を呼んで即座に再評価させられます。
+
+### 音声会話（Voice Agent）
+
+UI の「音声会話」タブは、マイク入力 → ElevenLabs で文字起こし → OpenAI で応答生成 → ElevenLabs で音声合成 → ブラウザ再生、の往復で会話します。話しかけることで返答を割り込めます（barge-in）。スピーカー利用時はエコー混入を避けるためヘッドホン推奨です。
+
+- 必須: `.env` に `ELEVENLABS_API_KEY`, `ELEVENLABS_TTS_VOICE_ID`, `OPENAI_API_KEY`
+- ヘルス: `GET /api/voice/status`
+- WS: `/ws/voice?lang=ja-JP`
+- 参考: `voice_assistant_audio_start` に `llmMs` / `ttsTtfbMs` が含まれ、UI に表示されます（体感遅延の内訳確認に利用）。
+- 日本語品質: `lang` が `ja-*` で `ELEVENLABS_TTS_MODEL_ID` 未設定の場合は `eleven_multilingual_v2` を自動適用（アカウント/モデル非対応時は自動で無指定にフォールバック）。
+- 速度調整: `ELEVENLABS_TTS_OPTIMIZE_STREAMING_LATENCY`（例: `3`）で ElevenLabs の初動レイテンシをチューニングできます。
 
 ### Whisper Streaming（faster-whisper-server, ローカル常駐）
 

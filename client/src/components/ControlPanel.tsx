@@ -48,6 +48,8 @@ interface ControlPanelProps {
   setEnableDiarization: (value: boolean) => void;
   enableChannelSplit: boolean;
   setEnableChannelSplit: (value: boolean) => void;
+  meetingMode: boolean;
+  setMeetingMode: (value: boolean) => void;
   supportsDiarization: boolean;
   allowDegraded: boolean;
   setAllowDegraded: (value: boolean) => void;
@@ -117,6 +119,8 @@ export const ControlPanel = memo(({
   setEnableDiarization,
   enableChannelSplit,
   setEnableChannelSplit,
+  meetingMode,
+  setMeetingMode,
   supportsDiarization,
   allowDegraded,
   setAllowDegraded,
@@ -173,6 +177,13 @@ export const ControlPanel = memo(({
   const inputHint = inputSource === 'mic'
     ? '選択したマイクからリアルタイム音声を送信します。'
     : '内部ファイルを選択するとMediaRecorder経路を再現し、プレビューで音声を再生できます。';
+
+  const channelSplitDisabled = Boolean(secondaryProvider) || inputSource !== 'mic';
+  const channelSplitHelper = channelSplitDisabled
+    ? secondaryProvider
+      ? '比較モードではチャネル分離は利用できません（音声が破綻するため）。単一プロバイダでお試しください。'
+      : 'チャネル分離はマイク入力のときのみ利用できます。'
+    : 'ステレオ入力の左右チャンネルをそのまま送信し、話者ID=L/Rとして表示します';
 
   return (
     <section className="control-panel">
@@ -457,7 +468,14 @@ export const ControlPanel = memo(({
               label="チャネル分離を試す (L/R を別話者扱い)"
               checked={enableChannelSplit}
               onChange={setEnableChannelSplit}
-              helperText="ステレオ入力の左右チャンネルをそのまま送信し、話者ID=L/Rとして表示します"
+              disabled={channelSplitDisabled}
+              helperText={channelSplitHelper}
+            />
+            <ToggleSwitch
+              label="会議モード (バックログ時に音声を間引いて追従)"
+              checked={meetingMode}
+              onChange={setMeetingMode}
+              helperText="ネットワーク揺れ/長時間セッション向け。遅延が積み上がる場合にサーバが一部チャンクをドロップして追従します。"
             />
             <ToggleSwitch
               label="品質低下モードを許可 (16kHz/mono未満でも続行)"
@@ -472,6 +490,7 @@ export const ControlPanel = memo(({
                 setEnableVad(true);
                 setEnableDiarization(supportsDiarization);
                 setEnableChannelSplit(true);
+                setMeetingMode(true);
                 setAllowDegraded(false);
               }}
             >

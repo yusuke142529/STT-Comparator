@@ -40,3 +40,25 @@ export const streamingConfigMessageSchema = z
       });
     }
   });
+
+export const voiceConfigMessageSchema = z
+  .object({
+    type: z.literal('config'),
+    pcm: z.literal(true),
+    clientSampleRate: z.number().int().min(8_000).max(96_000),
+    enableInterim: z.boolean().optional(),
+    options: z
+      .object({
+        finalizeDelayMs: z.number().int().min(0).max(10_000).optional(),
+      })
+      .partial()
+      .optional(),
+  })
+  .strict();
+
+export const voiceCommandMessageSchema = z
+  .object({
+    type: z.literal('command'),
+    name: z.enum(['barge_in', 'stop_speaking', 'reset_history']),
+  })
+  .strict();

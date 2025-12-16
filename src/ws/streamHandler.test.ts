@@ -106,6 +106,22 @@ describe('handleStreamConnection', () => {
     vi.useRealTimers();
   });
 
+  const flushMicrotasks = async (max = 10) => {
+    for (let i = 0; i < max; i += 1) {
+      await Promise.resolve();
+    }
+  };
+
+  const buildPcmFrame = (seq: number, captureTs: number, durationMs = 250) => {
+    const HEADER_BYTES = 16;
+    const frame = Buffer.alloc(HEADER_BYTES + 4);
+    frame.writeUInt32LE(seq, 0);
+    frame.writeDoubleLE(captureTs, 4);
+    frame.writeFloatLE(durationMs, 12);
+    frame.writeInt32LE(0, 16);
+    return frame;
+  };
+
   it('計測レイテンシが直近送信基準になる', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2024-01-01T00:00:00.000Z'));
@@ -119,6 +135,7 @@ describe('handleStreamConnection', () => {
     for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
       await Promise.resolve();
     }
+    await flushMicrotasks();
 
     vi.advanceTimersByTime(25);
 
@@ -147,6 +164,7 @@ describe('handleStreamConnection', () => {
     for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
       await Promise.resolve();
     }
+    await flushMicrotasks();
 
     vi.advanceTimersByTime(25);
     await Promise.resolve();
@@ -213,6 +231,7 @@ describe('handleStreamConnection', () => {
     await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
 
     ws.emit('message', Buffer.from('not-json'), false);
+    await flushMicrotasks();
 
     expect(ws.sent.some((m) => JSON.parse(m).type === 'error')).toBe(true);
     expect(ws.closed).toBe(true);
@@ -230,9 +249,81 @@ describe('handleStreamConnection', () => {
       Buffer.from(JSON.stringify({ type: 'config', dictionaryPhrases: oversized })),
       false
     );
+    await flushMicrotasks();
 
     expect(ws.sent.some((m) => JSON.parse(m).type === 'error')).toBe(true);
     expect(ws.closed).toBe(true);
+  });
+
+  it('enforces a hard send backlog limit to avoid unbounded growth', async () => {
+    const { loadConfig } = await import('../config.js');
+    const mockedLoadConfig = loadConfig as unknown as ReturnType<typeof vi.fn>;
+    mockedLoadConfig.mockResolvedValueOnce({
+      audio: { targetSampleRate: 16000, targetChannels: 1, chunkMs: 250 },
+      normalization: {},
+      storage: { driver: 'jsonl', path: './runs' },
+      providers: ['mock'],
+      ws: { compare: { backlogSoft: 1, backlogHard: 2, maxDropMs: 1000 } },
+    });
+
+    const restoreSendAudio = state.controller.sendAudio.getMockImplementation();
+    state.controller.sendAudio.mockImplementation(() => new Promise(() => {}));
+    const { handleStreamConnection } = await import('./streamHandler.js');
+    const ws = new FakeWebSocket();
+    await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })), false);
+    await flushMicrotasks();
+
+    ws.emit('message', buildPcmFrame(1, Date.now()), true);
+    ws.emit('message', buildPcmFrame(2, Date.now()), true);
+    ws.emit('message', buildPcmFrame(3, Date.now()), true);
+    await flushMicrotasks();
+
+    const error = ws.sent.map((m) => JSON.parse(m)).find((m) => m.type === 'error');
+    expect(error?.message).toMatch(/backlog hard limit/i);
+    expect(ws.closed).toBe(true);
+    if (restoreSendAudio) {
+      state.controller.sendAudio.mockImplementation(restoreSendAudio);
+    }
+  });
+
+  it('drops audio in meetingMode until the drop budget is exceeded', async () => {
+    const { loadConfig } = await import('../config.js');
+    const mockedLoadConfig = loadConfig as unknown as ReturnType<typeof vi.fn>;
+    mockedLoadConfig.mockResolvedValueOnce({
+      audio: { targetSampleRate: 16000, targetChannels: 1, chunkMs: 250 },
+      normalization: {},
+      storage: { driver: 'jsonl', path: './runs' },
+      providers: ['mock'],
+      ws: { compare: { backlogSoft: 1, backlogHard: 10, maxDropMs: 500 } },
+    });
+
+    const restoreSendAudio = state.controller.sendAudio.getMockImplementation();
+    state.controller.sendAudio.mockImplementation(() => new Promise(() => {}));
+    const { handleStreamConnection } = await import('./streamHandler.js');
+    const ws = new FakeWebSocket();
+    await handleStreamConnection(ws as any, 'mock', 'ja-JP', noopStore);
+
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { meetingMode: true } })),
+      false
+    );
+    await flushMicrotasks();
+
+    ws.emit('message', buildPcmFrame(1, Date.now(), 250), true);
+    ws.emit('message', buildPcmFrame(2, Date.now(), 250), true);
+    ws.emit('message', buildPcmFrame(3, Date.now(), 250), true);
+    ws.emit('message', buildPcmFrame(4, Date.now(), 250), true);
+    await flushMicrotasks();
+
+    const error = ws.sent.map((m) => JSON.parse(m)).find((m) => m.type === 'error');
+    expect(error?.message).toMatch(/drop budget/i);
+    expect(ws.closed).toBe(true);
+    if (restoreSendAudio) {
+      state.controller.sendAudio.mockImplementation(restoreSendAudio);
+    }
   });
 
   it('PCM モードでヘッダー付きチャンクを処理し、捕捉タイムスタンプからレイテンシを計算する', async () => {
@@ -259,6 +350,7 @@ describe('handleStreamConnection', () => {
     for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
       await Promise.resolve();
     }
+    await flushMicrotasks();
     vi.advanceTimersByTime(25);
 
     const messages = ws.sent.map((m) => JSON.parse(m));
@@ -279,6 +371,7 @@ describe('handleStreamConnection', () => {
       Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
       false
     );
+    await flushMicrotasks();
 
     expect(state.startOptions?.sampleRateHz).toBe(24_000);
   });

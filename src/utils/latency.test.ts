@@ -35,6 +35,25 @@ describe('persistLatency', () => {
     expect(payload.endedAt).toBe('2024-03-01T00:00:05.000Z');
   });
 
+  it('filters invalid latency values before persisting', async () => {
+    const append = vi.fn();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2024-03-01T00:00:05.000Z'));
+
+    await persistLatency(
+      [100, Number.NaN, -10, Infinity, 200],
+      { sessionId: 's1', provider: 'mock', lang: 'ja-JP', startedAt: '2024-03-01T00:00:00.000Z' },
+      { ...noopStore, append }
+    );
+
+    expect(append).toHaveBeenCalledTimes(1);
+    const payload = append.mock.calls[0][0];
+    expect(payload.count).toBe(2);
+    expect(payload.min).toBe(100);
+    expect(payload.max).toBe(200);
+    expect(payload.avg).toBeCloseTo(150);
+  });
+
   it('skips persistence for empty sessions', async () => {
     const append = vi.fn();
     await persistLatency([], { sessionId: 's1', provider: 'mock', lang: 'ja-JP', startedAt: '2024-03-01T00:00:00.000Z' }, {

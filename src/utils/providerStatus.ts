@@ -44,7 +44,7 @@ interface ProviderFeatureFlags {
 const PROVIDER_FEATURE_OVERRIDES: Record<ProviderId, ProviderFeatureFlags> = {
   deepgram: { dictionary: true, punctuation: true, context: true, diarization: true },
   elevenlabs: { dictionary: false, punctuation: false, context: false, diarization: true },
-  openai: { dictionary: true, punctuation: true, context: true, diarization: true },
+  openai: { dictionary: true, punctuation: false, context: true, diarization: false },
   local_whisper: {},
   mock: {},
   azure: {},
@@ -125,11 +125,7 @@ export async function computeProviderAvailability(
       continue;
     }
     if (id === 'openai') {
-      const diarizationEnabled = process.env.OPENAI_ENABLE_DIARIZATION === 'true';
-      const features = {
-        ...PROVIDER_FEATURE_OVERRIDES[id],
-        diarization: diarizationEnabled ? PROVIDER_FEATURE_OVERRIDES[id].diarization : false,
-      };
+      const features = PROVIDER_FEATURE_OVERRIDES[id];
       if (!process.env.OPENAI_API_KEY) {
         results.push({
           id,

@@ -1,6 +1,7 @@
 import type { BatchJobFileResult } from '../types.js';
 
 export interface SummaryStats {
+  n: number;
   avg: number | null;
   p50: number | null;
   p95: number | null;
@@ -28,9 +29,9 @@ function quantile(values: number[], q: number): number | null {
 
 function summarize(values: Array<number | undefined | null>): SummaryStats {
   const nums = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-  if (nums.length === 0) return { avg: null, p50: null, p95: null };
+  if (nums.length === 0) return { n: 0, avg: null, p50: null, p95: null };
   const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
-  return { avg, p50: quantile(nums, 0.5), p95: quantile(nums, 0.95) };
+  return { n: nums.length, avg, p50: quantile(nums, 0.5), p95: quantile(nums, 0.95) };
 }
 
 export function summarizeJob(results: BatchJobFileResult[]): JobSummary {
@@ -48,7 +49,7 @@ export function summarizeJobByProvider(
 ): Record<string, JobSummary> {
   const grouped = results.reduce<Record<string, BatchJobFileResult[]>>((acc, row) => {
     const key = row.provider;
-    acc[key] = acc[key] ? [...acc[key], row] : [row];
+    (acc[key] ??= []).push(row);
     return acc;
   }, {});
   return Object.fromEntries(

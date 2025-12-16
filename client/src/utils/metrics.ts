@@ -7,7 +7,7 @@ export const fmt = (value: number | null | undefined): string => {
 
 export const summarizeMetric = (values: Array<number | null | undefined>): SummaryStats => {
   const nums = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-  if (nums.length === 0) return { avg: null, p50: null, p95: null };
+  if (nums.length === 0) return { n: 0, avg: null, p50: null, p95: null };
   const sorted = [...nums].sort((a, b) => a - b);
   const quantile = (q: number) => {
     const pos = (sorted.length - 1) * q;
@@ -17,7 +17,7 @@ export const summarizeMetric = (values: Array<number | null | undefined>): Summa
     return sorted[base];
   };
   const avg = nums.reduce((acc, curr) => acc + curr, 0) / nums.length;
-  return { avg, p50: quantile(0.5), p95: quantile(0.95) };
+  return { n: nums.length, avg, p50: quantile(0.5), p95: quantile(0.95) };
 };
 
 export const summarizeJobLocal = (rows: FileResult[]): JobSummary => ({

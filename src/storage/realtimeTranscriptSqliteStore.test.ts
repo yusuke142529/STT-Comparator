@@ -1,13 +1,13 @@
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import type DatabaseConstructor from 'better-sqlite3';
 import { RealtimeTranscriptSqliteStore } from './realtimeTranscriptSqliteStore.js';
 import type { RealtimeTranscriptLogEntry } from '../types.js';
 
 let sqliteAvailable = true;
-let Database: typeof import('better-sqlite3').default;
+let Database: DatabaseConstructor;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   Database = require('better-sqlite3');
   try {
     const probe = new Database(':memory:');

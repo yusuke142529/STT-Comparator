@@ -45,6 +45,7 @@ export interface JobStatus {
 }
 
 export interface SummaryStats {
+  n: number;
   avg: number | null;
   p50: number | null;
   p95: number | null;

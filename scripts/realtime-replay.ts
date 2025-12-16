@@ -14,6 +14,7 @@ import {
   StreamTranscriptMessage,
   TranscriptionOptions,
 } from '../src/types.ts';
+import { STREAM_HEADER_BYTES } from '../src/utils/streamHeader.ts';
 import {
   RealtimeReplayConfig,
   buildStreamingConfigMessage,
@@ -79,6 +80,9 @@ Options:
 const DEFAULT_SERVER = 'ws://localhost:4100/ws/stream';
 const DEFAULT_PROVIDER: ProviderId = 'mock';
 const DEFAULT_LANGUAGE = 'ja-JP';
+const DEFAULT_CHUNK_MS = 250;
+const DEFAULT_SAMPLE_RATE = 16000;
+const OPENAI_SAMPLE_RATE = 24000;
 
 function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {
@@ -355,7 +359,13 @@ async function runReplayForTarget(config: RealtimeReplayConfig, target: ReplayTa
 
   await openPromise;
 
-  const configMessage = buildStreamingConfigMessage(config);
+  const sampleRateHz = config.provider === 'openai' ? OPENAI_SAMPLE_RATE : DEFAULT_SAMPLE_RATE;
+  const configMessage = {
+    ...buildStreamingConfigMessage(config),
+    pcm: true,
+    clientSampleRate: sampleRateHz,
+    channels: 1,
+  };
   ws.send(JSON.stringify(configMessage));
 
   try {
@@ -371,20 +381,67 @@ async function runReplayForTarget(config: RealtimeReplayConfig, target: ReplayTa
       };
     }
 
+    const chunkMs = DEFAULT_CHUNK_MS;
+    const samplesPerChunk = Math.max(1, Math.round((sampleRateHz * chunkMs) / 1000));
+    const bytesPerChunk = samplesPerChunk * 2; // mono 16-bit
+    let seq = 0;
+    let totalSamples = 0;
+    const startWallMs = Date.now();
+    let pending = Buffer.alloc(0);
+
+    const buildFrame = (pcm: Buffer) => {
+      const alignedBytes = pcm.length - (pcm.length % 2);
+      if (alignedBytes <= 0) return null;
+      const aligned = alignedBytes === pcm.length ? pcm : pcm.subarray(0, alignedBytes);
+      const samples = Math.floor(aligned.length / 2);
+      totalSamples += samples;
+      const durationMs = (samples / sampleRateHz) * 1000;
+      const captureTs = startWallMs + (totalSamples / sampleRateHz) * 1000;
+
+      const header = Buffer.alloc(STREAM_HEADER_BYTES);
+      header.writeUInt32LE(seq, 0);
+      header.writeDoubleLE(captureTs, 4);
+      header.writeFloatLE(durationMs, 12);
+      seq += 1;
+      return Buffer.concat([header, aligned]);
+    };
+
+    const tryFlush = () => {
+      if (!childProcess) return;
+      if (ws.readyState !== WebSocket.OPEN) return;
+      while (pending.length >= bytesPerChunk) {
+        const pcm = pending.subarray(0, bytesPerChunk);
+        pending = pending.subarray(bytesPerChunk);
+        const frame = buildFrame(pcm);
+        if (!frame) continue;
+        const ok = ws.send(frame, { binary: true });
+        if (!ok) {
+          childProcess.stdout?.pause();
+          ws.once('drain', () => {
+            childProcess?.stdout?.resume();
+            tryFlush();
+          });
+          return;
+        }
+      }
+    };
+
     childProcess = spawn(config.ffmpegPath, [
+      '-hide_banner',
+      '-v',
+      'error',
       '-re',
       '-i',
       target.filePath,
+      '-vn',
+      '-sn',
+      '-dn',
       '-ac',
       '1',
       '-ar',
-      '16000',
-      '-c:a',
-      'libopus',
-      '-b:a',
-      '64k',
+      String(sampleRateHz),
       '-f',
-      'webm',
+      's16le',
       'pipe:1',
     ]);
     currentHandles.childProcess = childProcess;
@@ -396,15 +453,20 @@ async function runReplayForTarget(config: RealtimeReplayConfig, target: ReplayTa
       }
     });
 
-    childProcess.stdout.on('data', (chunk: Buffer) => {
+    childProcess.stdout?.on('data', (chunk: Buffer) => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      const shouldContinue = ws.send(chunk, { binary: true });
-      if (!shouldContinue) {
-        childProcess?.stdout.pause();
-        ws.once('drain', () => {
-          childProcess?.stdout.resume();
-        });
+      pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+      tryFlush();
+    });
+
+    childProcess.stdout?.on('end', () => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (pending.length === 0) return;
+      const frame = buildFrame(pending);
+      if (frame) {
+        ws.send(frame, { binary: true });
       }
+      pending = Buffer.alloc(0);
     });
 
     const ffmpegPromise = new Promise<void>((resolve, reject) => {

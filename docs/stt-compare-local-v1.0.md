@@ -53,7 +53,7 @@
 - ローカル起動: Web UI とローカルサーバ（Node.js）は利用者マシン上で動作。外部通信は各ASRプロバイダのAPIエンドポイントまたはローカルASRサーバ（local_whisper, nvidia_riva等）のみ。
 - 同一PCM条件での比較（16kHz, 16-bit, mono 推奨）。
 - 評価時の正規化は NFKC + 句読点除去を基本とし、単語境界の公平性を保つため空白は保持する（stripSpace=false がデフォルト）。
-- ブラウザ音声取得は MediaRecorder（audio/webm; codecs=opus）→ ローカルサーバで PCM 変換。
+- ブラウザ音声取得は AudioWorklet（PCM16LE）→ WS で PCM フレーム送信（推奨）。互換として webm/opus を送ってサーバ側で FFmpeg 変換する経路も残す。
 - サポートブラウザ: Chrome / Edge 最新版。Safari 等は v1.0 では対象外。
 - OS: Windows / macOS / Linux（Node.js v20+ / FFmpeg が必要）。
 - 日本語評価は CER、英語系は WER を主指標（切替可能）。
@@ -81,7 +81,7 @@
 
 ## 6. 全体アーキテクチャ
 ```
-Web UI (React/TS) -> WS(JSON config + binary webm/opus) -> Local Node Server
+Web UI (React/TS) -> WS(JSON config + binary PCM frames) -> Local Node Server
 Node Server: Transmux (FFmpeg), Router, Scoring, Storage (JSONL/SQLite), CSV/JSON export
 Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisper（Batchのみ） / whisper_streaming（Realtime/Batch） / mock（ローカル確認/テスト用のスタブ。デフォルト設定には含めていない）。他クラウドは任意拡張（デフォルト無効）
 ```
@@ -89,7 +89,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 ## 7. モジュール構成と責務
 - Web UI: マイク制御、WS接続、部分／確定表示、条件選択、バッチ評価UI、結果可視化。
   - 句読点ポリシー（none/basic/full）をUIで切替可能。
-- Transmux: webm/opus → FFmpeg → PCM(16k mono, linear16) 変換し Adapter に送る。preview/replay/batch のアップロードファイルも受信直後に FFmpeg の strict フラグ（`-v error -xerror -err_detect explode` など）で 16k mono PCM WAV に正規化し、デコードエラーや 100ms 未満の出力しか得られない壊れた音源は 400 で拒否する。正規化パラメータは `config.json.ingressNormalize`（サンプルレート/チャンネル/ピークヘッドルーム）で統一管理し、`AUDIO_UNSUPPORTED_FORMAT` を UI へ返して再試行を促す。
+- Transmux: 互換モード（webm/opus 等）の場合は FFmpeg → PCM(16k mono, linear16) 変換し Adapter に送る。preview/replay/batch のアップロードファイルも受信直後に FFmpeg の strict フラグ（`-v error -xerror -err_detect explode` など）で 16k mono PCM WAV に正規化し、デコードエラーや 100ms 未満の出力しか得られない壊れた音源は 400 で拒否する。正規化パラメータは `config.json.ingressNormalize`（サンプルレート/チャンネル/ピークヘッドルーム）で統一管理し、`AUDIO_UNSUPPORTED_FORMAT` を UI へ返して再試行を促す。
 - Router: ProviderId 解決、セッションライフサイクル管理、コンテキスト管理。
 - Provider Adapter: API/SDK/WS/gRPC への接続、PCM送信、結果正規化、supportsStreaming/batch を表現。
 - Scoring: 正規化、CER/WER/RTF 算出、レイテンシ算出、p50/p95 集計。
@@ -97,14 +97,15 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 
 ## 8. データフロー（シーケンス）
 ### 8.1 リアルタイム（マイク）
-1. Start → MediaRecorder開始 → WS `/ws/stream?provider=<id>&lang=<bcp47>` 接続。
-2. 接続直後に StreamingConfigMessage を送信。
-3. 約250msごとに webm/opus チャンクをバイナリ送信。
-4. サーバで FFmpeg 変換 → Adapter.startStreaming → PCM を逐次送信。
+1. Start → AudioWorklet（PCM収録）開始 → WS `/ws/stream?provider=<id>&lang=<bcp47>` 接続。
+   - チャネル分離（L/R）は単一プロバイダ時のみ対応（`/ws/stream/compare` では非対応）。
+2. 接続直後に StreamingConfigMessage（`pcm:true` + `clientSampleRate` 必須）を送信。
+3. 約250msごとに PCM16LE のフレームをバイナリ送信（ヘッダ + PCM）。
+4. サーバで必要に応じて provider 要求サンプルレートへリサンプル → Adapter.startStreaming → PCM を逐次送信。
 5. Adapter が Interim/Final を PartialTranscript に正規化。
-6. Server → UI: StreamTranscriptMessage(JSON) に timestamp を付与。
+6. Server → UI: StreamTranscriptMessage(JSON) を送信し、`latencyMs`/`originCaptureTs` を付与（captureTs ベース）。
 7. UI 表示、エラーはトースト。
-8. Stop で MediaRecorder 停止 → FFmpeg stdin close → Adapter end → WS close。
+8. Stop で Worklet 停止 → Adapter end → WS close。
 
 ### 8.2 バッチ
 1. UI で files[] と ref_json（任意）を指定し Run。並列度 options.parallel は「同時に処理するファイル数」を意味し、複数プロバイダー指定時はサーバ側で provider 数までは自動で引き上げ（config.jobs.maxParallel を上限）て同一ファイルを並列に転写し、公平な比較を担保する。
@@ -124,10 +125,18 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
   "enableInterim": true,
   "contextPhrases": ["サンプル"],
   "normalizePreset": "ja_cer",
-  "options": { "enableVad": false, "punctuationPolicy": "full", "parallel": 1 }
+  "pcm": true,
+  "clientSampleRate": 16000,
+  "channels": 1,
+  "options": { "enableVad": false, "meetingMode": true, "punctuationPolicy": "full", "parallel": 1 }
 }
 ```
-- 音声: MediaRecorder の webm/opus チャンク（~250ms）。
+- 音声（推奨 / UI既定）: PCM16LE フレーム（~250ms）。
+  - フレーム構造（Little Endian）: `seq(uint32)` + `captureTs(float64, ms)` + `durationMs(float32)` + `pcm(bytes)`
+  - `captureTs` は「当該チャンク末尾の壁時計(ms)」を推奨（レイテンシ算出の基準）。
+  - `pcm:true` のとき `clientSampleRate` は必須（サーバは provider ごとに必要ならリサンプル）。
+- 音声（互換 / ツール用途）: `pcm` を省略して webm/opus など圧縮チャンクを送ることも可能（サーバが FFmpeg で PCM 化する）。この場合 `captureTs` が無いので `latencyMs` はサーバ受信時刻ベースになる。
+- `options.meetingMode:true` のとき、サーバはバックログが一定以上に積み上がると一部のPCMチャンクをドロップして追従する（会議のリアルタイム性を優先）。ドロップが過剰な場合は `error` で切断し、`degraded:true` を付与してUIへ通知する。
 - Server → UI transcript 例:
 ```
 {
@@ -137,20 +146,24 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
   "text": "こんにちは",
   "words": [{ "startSec": 0.10, "endSec": 0.35, "text": "こんにち", "confidence": 0.86 }],
   "timestamp": 1732000000000,
-  "channel": "mic"
+  "channel": "mic",
+  "originCaptureTs": 1732000000000,
+  "latencyMs": 420
 }
 ```
 - エラー: `{ "type": "error", "message": "..." }`
 
 ### 9.2 HTTP（バッチ）
-- POST `/api/jobs/transcribe` (multipart/form-data): files[], provider, lang, ref_json (任意), options (任意)。
+- POST `/api/jobs/transcribe` (multipart/form-data): files[], (provider | providers), lang, ref_json (任意), options (任意)。
+  - `provider`: 単一プロバイダ
+  - `providers`: 複数プロバイダ（同一ファイルを同条件で並列評価し、結果は provider ごとに1行ずつ返る）
 - Response: `{ "jobId": "uuid", "queued": 10 }`
 - GET `/api/jobs/:jobId/status` → `{ jobId, total, done, failed }`
 - GET `/api/jobs/:jobId/results?format=csv|json`
   - CSV カラム例: path,provider,lang,cer,wer,rtf,latency_ms,text,ref_text
   - JSON 例: `{ path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, text, refText, opts }`
   - CSVはsnake_case、JSONはcamelCase。
-  - GET `/api/jobs/:jobId/summary` → `{ count, cer:{avg,p50,p95}, wer:{...}, rtf:{...}, latencyMs:{...} }`
+  - GET `/api/jobs/:jobId/summary` → `{ count, cer:{n,avg,p50,p95}, wer:{...}, rtf:{...}, latencyMs:{...} }`
 
 ### 9.5 リアルタイム: 内部再生
 - `POST /api/realtime/replay` (multipart/form-data: `file`, `provider`, `lang`) でファイルをアップロードし `sessionId` を返却。プロバイダは `streaming` 判定済みである必要があり、サーバは `ReplaySessionStore` に一時保存（TTL 5 分）し、録音なしでも同じ FFmpeg → Adapter の経路を再現する。
@@ -172,7 +185,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 ```
 
 ### 9.4 Realtime Replay Helper
-- `scripts/realtime-replay.ts` は UI の `MediaRecorder` → `/ws/stream` → FFmpeg → Adapter の本番経路を TypeScript で模倣し、`ffmpeg -re` で `sample-data` などのファイルを WebM/Opus に変換して直接ストリーミングします。このスクリプトを使えば、外部マイクを使えない静音環境でもプロバイダ・言語・マニフェストごとのレイテンシを再現性高く収集できます。
+- `scripts/realtime-replay.ts` は UI の `/ws/stream`（PCMフレーム）送信経路を TypeScript で模倣し、`ffmpeg -re` で `sample-data` などのファイルを PCM16LE に変換して 250ms フレームとして直接ストリーミングします。このスクリプトを使えば、外部マイクを使えない静音環境でもプロバイダ・言語・マニフェストごとのレイテンシを再現性高く収集できます。
 - 起動: `pnpm replay:realtime --provider mock --language ja-JP --file sample-data/your.wav`（`--manifest sample-data/manifest.example.json` も可）。`--enable-interim`/`--normalize-preset`/`--punctuation`/`--context`/`--dictionary` や `--dry-run` により、StreamingConfigMessage のパラメタを UI と同じ感覚で調整できます。
 - 出力: `StreamTranscriptMessage` を受信するたびに `latencyMs` を含むログ行（`interim` と `final`）、最後に平均/p95/最大の latency 要約、transcript count、final count を表示します。`GET /api/realtime/latency?limit=20` と併せて session-level の集計と突合させれば、実験比較の信頼性が高まります。
 - プロバイダごと: Deepgram では `.env` に `DEEPGRAM_API_KEY`、ElevenLabs では `ELEVENLABS_API_KEY`、`whisper_streaming` では faster-whisper-server が起動済みで `WHISPER_STREAMING_READY_URL` が通る状態であることを確認してからスクリプトを叩いてください。`mock` でまず挙動を確認し、必要なら manifest の `items[]` にノイズ・会話・朗読などのサンプルを追加して比較軸を整えてください。
@@ -184,7 +197,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 - StreamingOptions: language, sampleRateHz(16000), encoding 'linear16', enableInterim?, contextPhrases?
 - TranscriptWord, PartialTranscript (timestamp, channel 'mic'|'file')
 - PunctuationPolicy: 'none' | 'basic' | 'full'; TranscriptionOptions: enableVad?, punctuationPolicy?, dictionaryPhrases?, parallel?
-- StreamingConfigMessage { type:'config', enableInterim?, contextPhrases?, normalizePreset?, options? }
+- StreamingConfigMessage { type:'config', enableInterim?, contextPhrases?, normalizePreset?, pcm?, clientSampleRate?, channels?, channelSplit?, options? }
 - StreamingController/StreamingSession インタフェース
 - BatchResult { provider, text, words?, durationSec?, processingTimeMs? }
 - ProviderAdapter { id, supportsStreaming/batch, startStreaming(opts), transcribeFileFromPCM(pcm, opts) }
@@ -219,7 +232,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 ```
 {
   "audio": { "targetSampleRate": 16000, "targetChannels": 1, "chunkMs": 250 },
-  "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": true },
+  "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": false },
   "storage": { "driver": "jsonl", "path": "./runs/2025-11-19" }, // driver は jsonl または sqlite
   "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
   "ws": {
@@ -228,17 +241,22 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
   }
 }
 ```
+- 日本語CERでプロバイダが空白を挿入してしまうケースを吸収したい場合は、評価マニフェスト（ref_json）側で `normalization.stripSpace=true` を指定してください（ジョブ単位で切替可能）。
 - `providerHealth.refreshMs` を指定すると `/api/providers` のヘルスチェック結果を再計算する間隔（ミリ秒）を調整できます。デフォルト 5000 によりローカルの `whisper_streaming` 等を起動した直後でも数秒で「利用可能」へ切り替わるようになり、同エンドポイントは TTL 内でキャッシュを再利用して過剰なヘルスチェックを防ぎます。即時再評価が必要なときは `/api/admin/reload-config` を叩いてください。
 - `/api/providers` のレスポンスには `supportsDictionaryPhrases` / `supportsPunctuationPolicy` / `supportsContextPhrases` のようなフラグも含まれるため、クライアントはプロバイダごとの機能差を UI 表示や辞書・句読点コントロールの有効/無効に反映できます。
 
 ## 12. 音声処理ポリシー
-- Realtime: webm/opus、Batch: wav/mp3/mp4。サーバで PCM S16LE 16k mono に統一。
+- Realtime: PCMフレーム（推奨）または webm/opus（互換）。サーバで PCM S16LE（provider 要求に応じて 16k/24k）mono に統一。
+- Batch: wav/mp3/mp4。サーバで PCM S16LE 16k mono に統一（公平比較のベースライン）。
 - チャンク: 250ms（config.audio.chunkMs）。
 - VAD: オプション、公平比較では OFF をデフォルト。
 
 ## 13. 評価設計
-- 正規化: 日本語 NFKC→句読点除去→空白除去→CER、英語 NFKC→punct正規化→lower→WER。
-- 指標: CER, WER, RTF=(processingTimeMs/1000)/durationSec, レイテンシ latencyMs=サーバ送信→最初のInterim/Final受信差分。
+- 正規化（基本）: NFKC → 句読点除去。WER の単語境界を壊さないため、空白は保持（`stripSpace=false`）を基本とする。
+- 日本語評価（CER）で、プロバイダが挿入した空白を無視したい場合は `stripSpace=true` をジョブ（manifest）側で指定する。
+- 指標: CER, WER, RTF=(processingTimeMs/1000)/durationSec。
+  - Batch: `processingTimeMs` はサーバ計測（adapter 呼び出し→復帰）。`latencyMs` は互換目的で `processingTimeMs` と同値。
+  - Realtime: `latencyMs` は `Date.now() - originCaptureTs`（`originCaptureTs` は PCM フレームの `captureTs`。互換モード等で `captureTs` が無い場合はサーバ受信時刻ベース）。
 - 出力: 平均/p50/p95 を集計し UI と CSV/JSON で可視化。再現性確保。
 
 ## 14. UI仕様（要点）
@@ -258,7 +276,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 
 ## 17. テスト計画
 - ユニット: 正規化関数、CER/WER/RTF、小規模期待値、Adapterモック、TranscriptionOptionsパース。
-- 統合: Realtime往復（MediaRecorder→WS→FFmpeg→Adapter(Mock)→UI）、StreamServerMessage transcript/error 双方処理、バッチ10件程度、マニフェストと files[] マッピング検証。
+- 統合: Realtime往復（AudioWorklet→WS(PCMフレーム)→Adapter(Mock)→UI）、StreamServerMessage transcript/error 双方処理、バッチ10件程度、マニフェストと files[] マッピング検証。
 - 性能: 250ms チャンクドロップ無し、100×30s で RTF ≤1.0。
 - 受け入れ: 成功基準(0.3)を手順書で検証、プロバイダ切替/辞書/正規化差分が UI で比較可能。
 
@@ -280,7 +298,7 @@ stt-compare-local/
 
 ## 19. 実装要点（抜粋）
 - FFmpeg ブリッジ: `ffmpeg -f webm -i pipe:0 -ac 1 -ar 16000 -f s16le pipe:1` を用い、WSバイナリ→stdin、stdout→StreamingController.sendAudio。
-- ストリーミングLC: Start→WS→config→MediaRecorder、サーバで Adapter.startStreaming、Stop でFFmpeg close→controller.end、エラー時は StreamErrorMessage を送信。
+- ストリーミングLC: Start→WS→config→PCMフレーム送信、サーバで Adapter.startStreaming、Stop で controller.end、エラー時は StreamErrorMessage を送信。
 - スコア計算: CER/ WER（編集距離）、RTF=(processingTimeMs/1000)/durationSec、集計は平均/p50/p95。
 
 ## 20. 拡張計画（例）
@@ -364,5 +382,6 @@ latency: 350ms (interim), 900ms (final) | session: 00:02:31
 - nvidia_riva: ローカル常駐サーバへの接続。GPU要件は README に明記。
 
 ## 27. 付録D：サンプル正規化ロジック
-- 日本語: NFKC → 句読点除去 → 空白除去 → CER
-- 英語: NFKC → punctuation 正規化 → lowercase → WER
+- 共通（基本）: NFKC → 句読点除去（`stripSpace=false` で空白保持）
+- 日本語（CER）: 必要に応じて空白除去（`stripSpace=true`）
+- 英語系（WER）: 空白保持が前提（`stripSpace=false`）

@@ -209,6 +209,81 @@ export interface RealtimeTranscriptSessionSummary {
   entryCount: number;
 }
 
+export type VoiceState = 'listening' | 'thinking' | 'speaking';
+
+export interface VoiceConfigMessage {
+  type: 'config';
+  pcm: true;
+  clientSampleRate: number;
+  enableInterim?: boolean;
+  options?: {
+    /** Silence window to finalize a user turn. */
+    finalizeDelayMs?: number;
+  };
+}
+
+export interface VoiceCommandMessage {
+  type: 'command';
+  name: 'barge_in' | 'stop_speaking' | 'reset_history';
+}
+
+export interface VoiceStateMessage {
+  type: 'voice_state';
+  state: VoiceState;
+  ts: number;
+  turnId?: string;
+}
+
+export interface VoiceSessionMessage {
+  type: 'voice_session';
+  sessionId: string;
+  startedAt: string;
+  inputSampleRate: number;
+  outputAudioSpec: EffectiveAudioSpec;
+  sttProvider: ProviderId;
+  llmProvider: 'openai';
+  ttsProvider: ProviderId;
+}
+
+export interface VoiceUserTranscriptMessage {
+  type: 'voice_user_transcript';
+  isFinal: boolean;
+  text: string;
+  timestamp: number;
+}
+
+export interface VoiceAssistantTextMessage {
+  type: 'voice_assistant_text';
+  turnId: string;
+  text: string;
+  isFinal: boolean;
+  timestamp: number;
+}
+
+export interface VoiceAssistantAudioStartMessage {
+  type: 'voice_assistant_audio_start';
+  turnId: string;
+  timestamp: number;
+  llmMs?: number;
+  ttsTtfbMs?: number;
+}
+
+export interface VoiceAssistantAudioEndMessage {
+  type: 'voice_assistant_audio_end';
+  turnId: string;
+  timestamp: number;
+  reason?: 'completed' | 'barge_in' | 'stopped' | 'error';
+}
+
+export type VoiceServerMessage =
+  | VoiceSessionMessage
+  | VoiceStateMessage
+  | VoiceUserTranscriptMessage
+  | VoiceAssistantTextMessage
+  | VoiceAssistantAudioStartMessage
+  | VoiceAssistantAudioEndMessage
+  | StreamErrorMessage;
+
 export interface NormalizationConfig {
   nfkc?: boolean;
   stripPunct?: boolean;
@@ -244,11 +319,15 @@ export interface BatchJobFileResult {
   provider: ProviderId;
   lang: string;
   durationSec: number;
-  /** Server-measured wall clock processing time (enqueue -> adapter return) */
+  /** Server-measured wall clock processing time (adapter invocation -> return). */
   processingTimeMs: number;
   rtf: number;
   cer?: number;
   wer?: number;
+  /**
+   * Batch latency in milliseconds (server-measured wall-clock processing time for the adapter call).
+   * Realtime streaming latency is computed per transcript message and stored separately.
+   */
   latencyMs?: number;
   text: string;
   refText?: string;
@@ -306,6 +385,8 @@ export interface AppConfig {
 }
 
 export interface SummaryStats {
+  /** Number of valid samples included in this metric (finite values only). */
+  n: number;
   avg: number | null;
   p50: number | null;
   p95: number | null;

@@ -138,4 +138,17 @@ describe('computeProviderAvailability feature flags', () => {
     expect(openai?.available).toBe(false);
     expect(openai?.reason).toContain('OPENAI_API_KEY');
   });
+
+  it('reports openai capability flags consistent with implementation', async () => {
+    const config: AppConfig = { ...baseConfig, providers: ['openai'] };
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const result = await computeProviderAvailability(config);
+    const openai = result.find((p) => p.id === 'openai');
+    expect(openai).toBeDefined();
+    expect(openai?.available).toBe(true);
+    expect(openai?.supportsDictionaryPhrases).toBe(true);
+    expect(openai?.supportsContextPhrases).toBe(true);
+    expect(openai?.supportsPunctuationPolicy).toBe(false);
+    expect(openai?.supportsDiarization).toBe(false);
+  });
 });

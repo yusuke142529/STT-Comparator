@@ -155,11 +155,15 @@ export function createPcmResampler(options: {
   );
 
   type MetaState = {
+    // capture timestamp of the original input chunk (wall-clock ms), representing end-of-chunk.
     captureTs: number;
     durationMs: number;
     seq: number;
     expectedOutputSamples: number;
     sentOutputSamples: number;
+    // derived timeline for resampled output so that emitted captureTs remains end-of-chunk.
+    startTs: number;
+    msPerSample: number;
   };
 
   const ratio = outputSampleRate / inputSampleRate;
@@ -185,11 +189,15 @@ export function createPcmResampler(options: {
       const endByte = startByte + takeSamples * bytesPerSample;
       const slice = chunk.subarray(startByte, endByte);
 
-      const chunkStartMs = current.captureTs + (current.sentOutputSamples / outputSampleRate) * 1000;
-      const chunkDurationMs = (takeSamples / outputSampleRate) * 1000;
+      // The client/server protocol defines captureTs as end-of-chunk (wall-clock ms).
+      // When resampling, ffmpeg may emit PCM in arbitrary buffer sizes, so we derive a stable
+      // timeline based on the original chunk's duration and the expected resampled sample count.
+      const chunkStartMs = current.startTs + current.sentOutputSamples * current.msPerSample;
+      const chunkDurationMs = takeSamples * current.msPerSample;
+      const chunkEndMs = chunkStartMs + chunkDurationMs;
 
       onChunkCb(slice, {
-        captureTs: chunkStartMs,
+        captureTs: chunkEndMs,
         durationMs: chunkDurationMs,
         seq: current.seq,
       });
@@ -207,12 +215,21 @@ export function createPcmResampler(options: {
     if (!proc.stdin) return;
     const inputSamples = Math.floor(chunk.length / bytesPerSample);
     const expectedOutputSamples = Math.max(0, Math.round(inputSamples * ratio));
+    const durationMs =
+      Number.isFinite(meta.durationMs) && meta.durationMs > 0
+        ? meta.durationMs
+        : (inputSamples / inputSampleRate) * 1000;
+    const captureTs = meta.captureTs;
+    const msPerSample = expectedOutputSamples > 0 ? durationMs / expectedOutputSamples : 0;
+    const startTs = captureTs - durationMs;
     metaQueue.push({
-      captureTs: meta.captureTs,
-      durationMs: meta.durationMs,
+      captureTs,
+      durationMs,
       seq: meta.seq ?? 0,
       expectedOutputSamples,
       sentOutputSamples: 0,
+      startTs,
+      msPerSample,
     });
     const ok = proc.stdin.write(chunk);
     if (ok === false) {

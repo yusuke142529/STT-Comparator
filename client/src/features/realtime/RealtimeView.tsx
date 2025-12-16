@@ -30,6 +30,8 @@ interface RealtimeViewProps {
   setEnableDiarization: (value: boolean) => void;
   enableChannelSplit: boolean;
   setEnableChannelSplit: (value: boolean) => void;
+  meetingMode: boolean;
+  setMeetingMode: (value: boolean) => void;
   punctuationPolicy: PunctuationPolicy;
   setPunctuationPolicy: (value: PunctuationPolicy) => void;
   parallel: number;
@@ -60,6 +62,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     setEnableDiarization,
     enableChannelSplit,
     setEnableChannelSplit,
+    meetingMode,
+    setMeetingMode,
     punctuationPolicy,
     setPunctuationPolicy,
     parallel,
@@ -99,6 +103,12 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const secondaryTranscriptBodyRef = useRef<HTMLDivElement>(null);
   const [isAutoScrollPrimary, setIsAutoScrollPrimary] = useState(true);
   const [isAutoScrollSecondary, setIsAutoScrollSecondary] = useState(true);
+
+  useEffect(() => {
+    if (secondaryProvider && enableChannelSplit) {
+      setEnableChannelSplit(false);
+    }
+  }, [secondaryProvider, enableChannelSplit, setEnableChannelSplit]);
 
   const releaseReplayAudioUrl = useCallback(() => {
     if (replayAudioUrlRef.current) {
@@ -280,6 +290,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
       enableVad: boolean;
       enableDiarization: boolean;
       enableChannelSplit: boolean;
+      meetingMode: boolean;
       punctuationPolicy: PunctuationPolicy;
       parallel: number;
       dictionaryPhrases?: string[];
@@ -287,6 +298,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
       enableVad,
       enableDiarization: supportsDiarization ? enableDiarization : false,
       enableChannelSplit,
+      meetingMode,
       punctuationPolicy,
       parallel,
     };
@@ -305,6 +317,7 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     enableVad,
     enableDiarization,
     enableChannelSplit,
+    meetingMode,
     parallel,
     punctuationPolicy,
     supportsContext,
@@ -608,6 +621,8 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     setEnableDiarization,
     enableChannelSplit,
     setEnableChannelSplit,
+    meetingMode,
+    setMeetingMode,
     allowDegraded,
     setAllowDegraded,
     replayFile,

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { STREAM_HEADER_BYTES } from '../utils/streamHeader';
 import type { NormalizedRow, TranscriptRow, WsPayload } from '../types/app';
 import type { RetryController } from './retryController';
+import pcmWorkletUrl from '../audio/pcmWorklet.js?url';
 
 interface UseStreamSessionConfig {
   chunkMs: number;
@@ -384,12 +385,11 @@ export const useStreamSession = ({
           audioContextRef.current = context;
         }
 
-        const workletUrl = new URL('../audio/pcmWorklet.js', import.meta.url);
-        await context.audioWorklet.addModule(workletUrl);
+        await context.audioWorklet.addModule(pcmWorkletUrl);
 
         const source = context.createMediaStreamSource(activeStream);
         sourceNodeRef.current = source;
-        const chunkSamples = Math.round((targetSampleRate * chunkMs) / 1000);
+        const chunkSamples = Math.round((context.sampleRate * chunkMs) / 1000);
         const worklet = new AudioWorkletNode(context, 'pcm-worklet', {
           numberOfOutputs: 0,
           processorOptions: {

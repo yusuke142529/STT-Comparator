@@ -391,7 +391,9 @@ export async function handleReplayConnection(
       ).catch(() => undefined);
       await sessionStore.cleanup(sessionId);
       recordLog({ type: 'session_end', endedAt: new Date().toISOString() });
-    })();
+    })().catch((error) => {
+      logger.error({ event: 'replay_ws_close_error', provider, message: (error as Error).message });
+    });
   });
 }
 
@@ -678,7 +680,9 @@ export async function handleReplayMultiConnection(
       for (const provider of sessions.keys()) {
         recordLog(provider, { type: 'session_end', endedAt: new Date().toISOString() });
       }
-    })();
+    })().catch((error) => {
+      logger.error({ event: 'replay_multi_ws_close_error', message: (error as Error).message });
+    });
   });
 
   ws.on('error', (error) => {

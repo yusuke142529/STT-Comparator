@@ -6,6 +6,7 @@ import { useBatchJobManager } from './hooks/useBatchJobManager';
 import { useRetry } from './hooks/useRetry';
 import { STYLES } from './styles/theme';
 import { RealtimeView } from './features/realtime/RealtimeView';
+import { VoiceView } from './features/voice/VoiceView';
 import { BatchView } from './features/batch/BatchView';
 import { ResultsView } from './features/results/ResultsView';
 import type {
@@ -23,6 +24,7 @@ const sinkSelectionSupported =
 
 const tabMeta = [
   { id: 'realtime', label: 'リアルタイム' },
+  { id: 'voice', label: '音声会話' },
   { id: 'batch', label: 'バッチ処理' },
   { id: 'results', label: '結果分析' },
 ] as const;
@@ -37,10 +39,11 @@ export default function App() {
   const [enableVad, setEnableVad] = useState(false);
   const [enableDiarization, setEnableDiarization] = useState(false);
   const [enableChannelSplit, setEnableChannelSplit] = useState(false);
+  const [meetingMode, setMeetingMode] = useState(false);
   const [punctuationPolicy, setPunctuationPolicy] = useState<PunctuationPolicy>('full');
   const [parallel, setParallel] = useState(1);
   const [chunkMs, setChunkMs] = useState(250);
-  const [tab, setTab] = useState<'realtime' | 'batch' | 'results'>('realtime');
+  const [tab, setTab] = useState<'realtime' | 'voice' | 'batch' | 'results'>('realtime');
   const [providerWarning, setProviderWarning] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([
     { id: 'deepgram', available: true, implemented: true, supportsStreaming: true, supportsBatch: true },
@@ -240,6 +243,8 @@ export default function App() {
           setEnableDiarization={setEnableDiarization}
           enableChannelSplit={enableChannelSplit}
           setEnableChannelSplit={setEnableChannelSplit}
+          meetingMode={meetingMode}
+          setMeetingMode={setMeetingMode}
           punctuationPolicy={punctuationPolicy}
           setPunctuationPolicy={setPunctuationPolicy}
           parallel={parallel}
@@ -250,6 +255,8 @@ export default function App() {
           refreshLogSessions={refreshLogSessions}
         />
       )}
+
+      {tab === 'voice' && <VoiceView apiBase={API_BASE} lang={lang} />}
 
       {tab === 'batch' && (
         <BatchView

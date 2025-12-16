@@ -1,10 +1,11 @@
 import type { RealtimeLatencySummary, StorageDriver, ProviderId } from '../types.js';
 
 function summarizeLatency(values: number[]) {
-  if (values.length === 0) {
+  const valid = values.filter((v) => Number.isFinite(v) && v >= 0);
+  if (valid.length === 0) {
     return { count: 0, avg: null, p50: null, p95: null, min: null, max: null };
   }
-  const sorted = [...values].sort((a, b) => a - b);
+  const sorted = [...valid].sort((a, b) => a - b);
   const quantile = (q: number) => {
     const pos = (sorted.length - 1) * q;
     const base = Math.floor(pos);
@@ -12,9 +13,9 @@ function summarizeLatency(values: number[]) {
     if (sorted[base + 1] !== undefined) return sorted[base] + rest * (sorted[base + 1] - sorted[base]);
     return sorted[base];
   };
-  const avg = values.reduce((a, b) => a + b, 0) / values.length;
+  const avg = valid.reduce((a, b) => a + b, 0) / valid.length;
   return {
-    count: values.length,
+    count: valid.length,
     avg,
     p50: quantile(0.5),
     p95: quantile(0.95),
