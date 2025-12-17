@@ -47,9 +47,15 @@ export const voiceConfigMessageSchema = z
     pcm: z.literal(true),
     clientSampleRate: z.number().int().min(8_000).max(96_000),
     enableInterim: z.boolean().optional(),
+    presetId: z.string().min(1).max(50).optional(),
+    channels: z.number().int().min(1).max(2).optional(),
+    channelSplit: z.boolean().optional(),
     options: z
       .object({
         finalizeDelayMs: z.number().int().min(0).max(10_000).optional(),
+        meetingMode: z.boolean().optional(),
+        meetingRequireWakeWord: z.boolean().optional(),
+        wakeWords: z.array(z.string().min(1).max(40)).max(20).optional(),
       })
       .partial()
       .optional(),
@@ -60,5 +66,6 @@ export const voiceCommandMessageSchema = z
   .object({
     type: z.literal('command'),
     name: z.enum(['barge_in', 'stop_speaking', 'reset_history']),
+    playedMs: z.number().int().min(0).max(10 * 60_000).optional(),
   })
   .strict();

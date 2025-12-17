@@ -211,20 +211,41 @@ export interface RealtimeTranscriptSessionSummary {
 
 export type VoiceState = 'listening' | 'thinking' | 'speaking';
 
+export type VoiceAgentMode = 'pipeline' | 'openai_realtime';
+
+export type VoiceInputSource = 'mic' | 'meeting';
+
 export interface VoiceConfigMessage {
   type: 'config';
   pcm: true;
   clientSampleRate: number;
   enableInterim?: boolean;
+  /** Optional voice preset id selected by the client. */
+  presetId?: string;
+  /** Number of channels captured by the client (1=mono, 2=stereo). */
+  channels?: number;
+  /** Enable client-side L/R channel split when sending PCM. */
+  channelSplit?: boolean;
   options?: {
     /** Silence window to finalize a user turn. */
     finalizeDelayMs?: number;
+    /** Enables web-meeting optimized behavior (e.g., wake-word gating). */
+    meetingMode?: boolean;
+    /** Require wake words for meeting audio to trigger replies. */
+    meetingRequireWakeWord?: boolean;
+    /** Wake words used when meetingRequireWakeWord is enabled. */
+    wakeWords?: readonly string[];
   };
 }
 
 export interface VoiceCommandMessage {
   type: 'command';
   name: 'barge_in' | 'stop_speaking' | 'reset_history';
+  /**
+   * Best-effort estimate of how much assistant audio has actually been played to the user (ms).
+   * Used to truncate the remote conversation audio on interruptions.
+   */
+  playedMs?: number;
 }
 
 export interface VoiceStateMessage {
@@ -238,6 +259,8 @@ export interface VoiceSessionMessage {
   type: 'voice_session';
   sessionId: string;
   startedAt: string;
+  presetId?: string;
+  mode?: VoiceAgentMode;
   inputSampleRate: number;
   outputAudioSpec: EffectiveAudioSpec;
   sttProvider: ProviderId;
@@ -250,6 +273,8 @@ export interface VoiceUserTranscriptMessage {
   isFinal: boolean;
   text: string;
   timestamp: number;
+  source?: VoiceInputSource;
+  speakerId?: string;
 }
 
 export interface VoiceAssistantTextMessage {
@@ -381,6 +406,18 @@ export interface AppConfig {
   };
   providerLimits?: {
     batchMaxBytes?: Partial<Record<ProviderId, number>>;
+  };
+  voice?: {
+    /** Voice Agent presets shown in the UI (for per-session selection). */
+    presets?: Array<{
+      id: string;
+      label?: string;
+      mode?: VoiceAgentMode;
+      sttProvider: ProviderId;
+      ttsProvider: ProviderId;
+    }>;
+    /** Default preset id used when the client does not specify one. */
+    defaultPresetId?: string;
   };
 }
 

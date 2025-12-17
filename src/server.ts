@@ -13,7 +13,7 @@ import { handleStreamConnection } from './ws/streamHandler.js';
 import { handleCompareStreamConnection } from './ws/compareStreamHandler.js';
 import { handleReplayConnection, handleReplayMultiConnection } from './ws/replayHandler.js';
 import { handleVoiceConnection } from './ws/voiceHandler.js';
-import { getOpenAiChatUrl } from './voice/openaiChat.js';
+import { getVoicePresetCatalog } from './voice/voicePresets.js';
 import { logger } from './logger.js';
 import { createRealtimeStorage, createRealtimeTranscriptStore, createStorage } from './storage/index.js';
 import { loadConfig, reloadConfig } from './config.js';
@@ -428,20 +428,29 @@ async function bootstrap() {
   });
 
   app.get('/api/voice/status', (_req, res) => {
-    const missing: string[] = [];
-    if (!process.env.ELEVENLABS_API_KEY) missing.push('ELEVENLABS_API_KEY');
-    if (!process.env.ELEVENLABS_TTS_VOICE_ID) missing.push('ELEVENLABS_TTS_VOICE_ID');
-    if (!process.env.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
     try {
-      getOpenAiChatUrl();
-    } catch {
-      missing.push('OPENAI_CHAT_URL');
+      const catalog = getVoicePresetCatalog(config);
+      const available = catalog.presets.some((p) => p.available);
+      const defaultPreset =
+        (catalog.defaultPresetId ? catalog.presets.find((p) => p.id === catalog.defaultPresetId) : null) ??
+        catalog.presets[0] ??
+        null;
+      res.json({
+        available,
+        defaultPresetId: catalog.defaultPresetId,
+        presets: catalog.presets,
+        // Backward-compatible fields (derived from the default preset).
+        missing: defaultPreset ? [...defaultPreset.missingEnv, ...defaultPreset.issues] : [],
+        providers: defaultPreset?.providers,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'invalid voice configuration';
+      res.json({
+        available: false,
+        missing: [message],
+        presets: [],
+      });
     }
-    res.json({
-      available: missing.length === 0,
-      missing,
-      providers: { stt: 'elevenlabs', tts: 'elevenlabs', llm: 'openai' },
-    });
   });
 
   app.post('/api/realtime/preview', upload.single('file'), async (req, res, next) => {
@@ -822,17 +831,21 @@ async function bootstrap() {
       return;
     }
 
-    const missing: string[] = [];
-    if (!process.env.ELEVENLABS_API_KEY) missing.push('ELEVENLABS_API_KEY');
-    if (!process.env.ELEVENLABS_TTS_VOICE_ID) missing.push('ELEVENLABS_TTS_VOICE_ID');
-    if (!process.env.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
     try {
-      getOpenAiChatUrl();
-    } catch {
-      missing.push('OPENAI_CHAT_URL');
-    }
-    if (missing.length > 0) {
-      sendWsError(`voice agent unavailable: missing ${missing.join(', ')}`);
+      const catalog = getVoicePresetCatalog(config);
+      const hasAnyPreset = catalog.presets.length > 0;
+      const hasAvailable = catalog.presets.some((p) => p.available);
+      if (!hasAnyPreset) {
+        sendWsError('voice agent unavailable: no presets configured');
+        return;
+      }
+      if (!hasAvailable) {
+        sendWsError('voice agent unavailable: no presets available (check /api/voice/status)');
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'invalid voice configuration';
+      sendWsError(`voice agent unavailable: ${message}`);
       return;
     }
 

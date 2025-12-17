@@ -18,6 +18,9 @@ vi.mock('ws', () => {
       queueMicrotask(() => {
         this.readyState = FakeWebSocket.OPEN;
         this.emit('open');
+        // GA interface waits for session.created/session.updated before sending audio.
+        this.emit('message', JSON.stringify({ type: 'session.created' }));
+        this.emit('message', JSON.stringify({ type: 'session.updated' }));
       });
     }
     send(data: string | Buffer) {
@@ -40,6 +43,46 @@ describe('OpenAIAdapter streaming', () => {
     wsState.instances.length = 0;
   });
 
+  it('reads OPENAI_STREAMING_MODEL at call time (not import time)', async () => {
+    process.env.OPENAI_STREAMING_MODEL = 'gpt-4o-mini-transcribe';
+
+    const adapter = new OpenAIAdapter();
+    await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 16000,
+      encoding: 'linear16',
+    });
+
+    const ws = wsState.instances.at(-1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(String(ws?.url ?? '')).toContain('intent=transcription');
+    const firstSend = ws.sent[0] as string;
+    const parsed = JSON.parse(firstSend);
+    expect(parsed.type).toBe('session.update');
+    expect(parsed.session?.type).toBe('transcription');
+    expect(parsed.session?.audio?.input?.transcription?.model).toBe('gpt-4o-mini-transcribe');
+  });
+
+  it('defaults to gpt-4o-transcribe when OPENAI_STREAMING_MODEL is unset', async () => {
+    delete process.env.OPENAI_STREAMING_MODEL;
+
+    const adapter = new OpenAIAdapter();
+    await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 16000,
+      encoding: 'linear16',
+    });
+
+    const ws = wsState.instances.at(-1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(String(ws?.url ?? '')).toContain('intent=transcription');
+    const firstSend = ws.sent[0] as string;
+    const parsed = JSON.parse(firstSend);
+    expect(parsed.type).toBe('session.update');
+    expect(parsed.session?.type).toBe('transcription');
+    expect(parsed.session?.audio?.input?.transcription?.model).toBe('gpt-4o-transcribe');
+  });
+
   it('builds prompt from context/dictionary and surfaces speakerId from events', async () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({
@@ -54,7 +97,7 @@ describe('OpenAIAdapter streaming', () => {
     await new Promise((r) => setTimeout(r, 10));
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
-    expect(parsed.session?.input_audio_transcription?.prompt).toBe('alpha, beta, gamma');
+    expect(parsed.session?.audio?.input?.transcription?.prompt).toBe('alpha, beta, gamma');
 
     const seen: Array<{ text: string; speakerId?: string }> = [];
     session.onData((t) => seen.push({ text: t.text, speakerId: t.speakerId }));
@@ -94,13 +137,15 @@ describe('OpenAIAdapter streaming', () => {
     const ws = wsState.instances[0];
     expect(ws).toBeDefined();
 
-    // wait for open and transcription_session.update
+    // wait for open and session.update
     await new Promise((r) => setTimeout(r, 10));
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
-    expect(parsed.type).toBe('transcription_session.update');
-    expect(parsed.session?.input_audio_format).toBe('pcm16');
-    expect(parsed.session?.input_audio_transcription?.language).toBe('en');
+    expect(parsed.type).toBe('session.update');
+    expect(parsed.session?.type).toBe('transcription');
+    expect(parsed.session?.audio?.input?.format?.type).toBe('audio/pcm');
+    expect(parsed.session?.audio?.input?.format?.rate).toBe(24000);
+    expect(parsed.session?.audio?.input?.transcription?.language).toBe('en');
 
     const transcripts: string[] = [];
     session.onData((t) => transcripts.push(`${t.isFinal ? 'F' : 'I'}:${t.text}`));
@@ -157,8 +202,8 @@ describe('OpenAIAdapter streaming', () => {
     await new Promise((r) => setTimeout(r, 10));
     const firstSend = ws.sent[0] as string;
     const parsed = JSON.parse(firstSend);
-    expect(parsed.type).toBe('transcription_session.update');
-    expect(parsed.session?.input_audio_transcription?.language).toBe('ja');
+    expect(parsed.type).toBe('session.update');
+    expect(parsed.session?.audio?.input?.transcription?.language).toBe('ja');
   });
 
   it('commits remaining buffered audio on end even when shorter than min buffer', async () => {
@@ -190,6 +235,31 @@ describe('OpenAIAdapter batch', () => {
   beforeEach(() => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.OPENAI_BATCH_MODEL = 'gpt-4o-transcribe';
+  });
+
+  it('reads OPENAI_BATCH_MODEL at call time (not import time)', async () => {
+    process.env.OPENAI_BATCH_MODEL = 'gpt-4o-mini-transcribe';
+
+    const fetchMock = vi.fn(async (_url, init) => {
+      const form = init?.body as FormData;
+      expect(form.get('model')).toBe('gpt-4o-mini-transcribe');
+      return new Response(JSON.stringify({ text: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    // @ts-expect-error override global fetch for test
+    global.fetch = fetchMock;
+
+    const adapter = new OpenAIAdapter();
+    const pcm = new Int16Array([1, 2]);
+    await adapter.transcribeFileFromPCM(ReadableFromBuffer(Buffer.from(pcm.buffer)), {
+      language: 'en',
+      sampleRateHz: 16000,
+      encoding: 'linear16',
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('wraps PCM into WAV and parses words', async () => {

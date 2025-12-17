@@ -18,9 +18,17 @@ const OPENAI_MANUAL_COMMIT_INTERVAL_MS = 1_000;
 const OPENAI_STREAM_BUFFER_HIGH_WATER_BYTES = 5 * 1024 * 1024;
 
 // Realtime transcription currently supports: whisper-1, gpt-4o-transcribe, gpt-4o-mini-transcribe.
-const DEFAULT_STREAMING_MODEL = process.env.OPENAI_STREAMING_MODEL ?? 'gpt-4o-transcribe';
-const DEFAULT_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL ?? 'gpt-4o-transcribe';
-const FALLBACK_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL_FALLBACK ?? 'whisper-1';
+function getDefaultStreamingModel(): string {
+  return process.env.OPENAI_STREAMING_MODEL ?? 'gpt-4o-transcribe';
+}
+
+function getDefaultBatchModel(): string {
+  return process.env.OPENAI_BATCH_MODEL ?? 'gpt-4o-transcribe';
+}
+
+function getFallbackBatchModel(): string {
+  return process.env.OPENAI_BATCH_MODEL_FALLBACK ?? 'whisper-1';
+}
 
 const OPENAI_REALTIME_WS = 'wss://api.openai.com/v1/realtime';
 const OPENAI_AUDIO_TRANSCRIPTION = 'https://api.openai.com/v1/audio/transcriptions';
@@ -29,6 +37,7 @@ const RESAMPLED_SAMPLE_RATE = 24_000;
 const BATCH_IDLE_TIMEOUT_MS = 30_000;
 const BATCH_HARD_TIMEOUT_MS = 5 * 60 * 1000;
 const WS_OPEN_TIMEOUT_MS = 10_000;
+const WS_CLOSE_TIMEOUT_MS = 2_000;
 
 function requireApiKey(): string {
   const key = process.env.OPENAI_API_KEY;
@@ -406,7 +415,7 @@ export class OpenAIAdapter extends BaseAdapter {
 
   async startStreaming(opts: StreamingOptions): Promise<StreamingSession> {
     const apiKey = requireApiKey();
-    const model = opts.model ?? DEFAULT_STREAMING_MODEL;
+    const transcriptionModel = (opts.model ?? getDefaultStreamingModel()).trim();
     const language = normalizeIsoLanguageCode(opts.language);
     const sourceSampleRate = opts.sampleRateHz ?? 16_000;
     const allowInterim = opts.enableInterim !== false;
@@ -416,23 +425,24 @@ export class OpenAIAdapter extends BaseAdapter {
       throw new Error(`invalid sampleRateHz: ${sourceSampleRate}`);
     }
 
-    // For transcription-only sessions, connect with intent=transcription and configure via `transcription_session.update`.
-    const url = `${OPENAI_REALTIME_WS}?intent=transcription`;
+    // Realtime transcription uses a dedicated intent + `session.update` with session.type='transcription'.
+    const url = new URL(OPENAI_REALTIME_WS);
+    url.searchParams.set('intent', 'transcription');
 
     logger.info({
       event: 'openai_stream_start',
-      model,
+      wsIntent: 'transcription',
+      transcriptionModel,
       language,
       sourceSampleRate,
       targetSampleRate: RESAMPLED_SAMPLE_RATE,
-      schema: 'transcription_session.update',
+      schema: 'session.update',
+      sessionType: 'transcription',
     });
 
-    const ws = new WebSocket(url, {
+    const ws = new WebSocket(url.toString(), {
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        // Kept for backward compatibility with environments still expecting the header.
-        'OpenAI-Beta': 'realtime=v1',
       },
     });
 
@@ -446,6 +456,7 @@ export class OpenAIAdapter extends BaseAdapter {
 
     let pingTimer: NodeJS.Timeout | null = null;
     let manualCommitTimer: NodeJS.Timeout | null = null;
+    let closeRequested = false;
     const partialByItem = new Map<string, string>();
 
     let hasBufferedAudio = false;
@@ -474,56 +485,93 @@ export class OpenAIAdapter extends BaseAdapter {
       return Array.from(new Set(pieces)).join(', ');
     };
 
+    let readySettled = false;
+    let resolveReady: (() => void) | null = null;
+    let rejectReady: ((err: Error) => void) | null = null;
+    let readyTimer: NodeJS.Timeout | null = null;
+    let sawSessionCreated = false;
+    let sawSessionUpdated = false;
+
+    const settleReady = (err?: Error) => {
+      if (readySettled) return;
+      readySettled = true;
+      if (readyTimer) {
+        clearTimeout(readyTimer);
+        readyTimer = null;
+      }
+      const resolve = resolveReady;
+      const reject = rejectReady;
+      resolveReady = null;
+      rejectReady = null;
+      if (err) {
+        reject?.(err);
+        return;
+      }
+      resolve?.();
+    };
+
+    const maybeResolveReady = () => {
+      if (!sawSessionCreated) return;
+      if (!sawSessionUpdated) return;
+      settleReady();
+    };
+
     const wsReady = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      resolveReady = resolve;
+      rejectReady = reject;
+
+      readyTimer = setTimeout(() => {
         try {
           ws.terminate();
         } catch {
           // ignore
         }
-        reject(new Error('openai realtime connection timeout'));
+        settleReady(new Error('openai realtime connection timeout'));
       }, WS_OPEN_TIMEOUT_MS);
 
       ws.once('open', () => {
-        clearTimeout(timer);
-
         const prompt = buildPrompt();
         const session = {
-          input_audio_format: 'pcm16' as const, // 24k mono PCM @ 16-bit
-          input_audio_noise_reduction: { type: 'near_field' as const },
-          input_audio_transcription: {
-            model,
-            language: language ?? '',
-            prompt,
+          type: 'transcription',
+          audio: {
+            input: {
+              format: { type: 'audio/pcm', rate: RESAMPLED_SAMPLE_RATE },
+              noise_reduction: { type: 'near_field' },
+              transcription: {
+                model: transcriptionModel,
+                language: language || undefined,
+                prompt,
+              },
+              turn_detection: serverVadEnabled
+                ? {
+                    type: 'server_vad',
+                    silence_duration_ms: 500,
+                    prefix_padding_ms: 300,
+                    threshold: 0.5,
+                  }
+                : null,
+            },
           },
-          turn_detection: serverVadEnabled
-            ? {
-                type: 'server_vad',
-                silence_duration_ms: 500,
-                prefix_padding_ms: 300,
-                threshold: 0.5,
-              }
-            : null,
         };
 
-        ws.send(
-          JSON.stringify({
-            type: 'transcription_session.update',
-            session,
-          })
-        );
-
-        resolve();
+        try {
+          ws.send(
+            JSON.stringify({
+              type: 'session.update',
+              session,
+            })
+          );
+        } catch (err) {
+          settleReady(toError(err, 'openai realtime send failed'));
+        }
       });
 
       ws.once('error', (err) => {
-        clearTimeout(timer);
-        reject(toError(err, 'openai realtime socket error'));
+        settleReady(toError(err, 'openai realtime socket error'));
       });
 
       ws.once('close', () => {
-        clearTimeout(timer);
-        reject(new Error('openai realtime socket closed before ready'));
+        settleReady(new Error('openai realtime socket closed before ready'));
       });
     });
     void wsReady.catch(() => undefined);
@@ -551,6 +599,7 @@ export class OpenAIAdapter extends BaseAdapter {
     };
 
     ws.on('message', (raw: RawData) => {
+      if (closeRequested) return;
       const text = rawDataToUtf8(raw);
       if (!text) return;
 
@@ -561,6 +610,24 @@ export class OpenAIAdapter extends BaseAdapter {
           const t =
             isRecord(payload) && typeof payload.type === 'string' ? payload.type : 'unknown_event';
           logger.debug({ event: 'openai_ws_message', type: t, snippet: text.slice(0, 800) });
+        }
+
+        if (
+          isRecord(payload) &&
+          (payload.type === 'transcription_session.created' || payload.type === 'session.created')
+        ) {
+          sawSessionCreated = true;
+          maybeResolveReady();
+          return;
+        }
+
+        if (
+          isRecord(payload) &&
+          (payload.type === 'transcription_session.updated' || payload.type === 'session.updated')
+        ) {
+          sawSessionUpdated = true;
+          maybeResolveReady();
+          return;
         }
 
         // Prefer cumulative assembly for OpenAI deltas so UI sees growing text instead of tokens.
@@ -655,6 +722,9 @@ export class OpenAIAdapter extends BaseAdapter {
             resetBufferedState();
             return;
           }
+          if (!readySettled) {
+            settleReady(new Error(message));
+          }
           listeners.error.forEach((cb) => cb(new Error(message)));
         }
       } catch (err) {
@@ -723,17 +793,35 @@ export class OpenAIAdapter extends BaseAdapter {
       },
 
       async close() {
+        if (closeRequested) return;
+        closeRequested = true;
         clearManualCommitTimer();
         if (hasBufferedAudio) {
           await commitBuffer(true).catch(() => {
             // ignore commit errors during shutdown
           });
         }
+        const waitForClose = new Promise<void>((resolve) => {
+          ws.once('close', () => resolve());
+        });
         try {
           ws.close();
         } catch {
           // ignore
         }
+        await Promise.race([
+          waitForClose,
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              try {
+                ws.terminate();
+              } catch {
+                // ignore
+              }
+              resolve();
+            }, WS_CLOSE_TIMEOUT_MS)
+          ),
+        ]);
       },
     };
 
@@ -764,8 +852,8 @@ export class OpenAIAdapter extends BaseAdapter {
 
   async transcribeFileFromPCM(pcm: NodeJS.ReadableStream, opts: StreamingOptions): Promise<BatchResult> {
     const apiKey = requireApiKey();
-    const primaryModel = opts.batchModel ?? opts.model ?? DEFAULT_BATCH_MODEL;
-    const fallbackModel = opts.fallbackModel ?? FALLBACK_BATCH_MODEL;
+    const primaryModel = opts.batchModel ?? opts.model ?? getDefaultBatchModel();
+    const fallbackModel = opts.fallbackModel ?? getFallbackBatchModel();
     const language = normalizeIsoLanguageCode(opts.language);
 
     const sampleRateHz = opts.sampleRateHz ?? 16_000;

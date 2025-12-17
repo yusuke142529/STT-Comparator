@@ -79,7 +79,7 @@ function coerceContent(content: unknown): string | null {
 
 export async function generateChatReply(
   messages: ChatMessage[],
-  options?: { lang?: string; signal?: AbortSignal }
+  options?: { signal?: AbortSignal }
 ): Promise<string> {
   const apiKey = requireApiKey();
   const url = getOpenAiChatUrl();

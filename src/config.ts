@@ -22,6 +22,22 @@ const ingressNormalizeSchema = z
   .partial()
   .default({});
 
+const voicePresetSchema = z.object({
+  id: z.string().min(1).max(50),
+  label: z.string().min(1).max(100).optional(),
+  mode: z.enum(['pipeline', 'openai_realtime']).optional(),
+  sttProvider: z.enum(PROVIDER_IDS),
+  ttsProvider: z.enum(PROVIDER_IDS),
+});
+
+const voiceSchema = z
+  .object({
+    presets: z.array(voicePresetSchema).min(1).max(20).optional(),
+    defaultPresetId: z.string().min(1).max(50).optional(),
+  })
+  .partial()
+  .default({});
+
 const configSchema = z.object({
   audio: z.object({
     targetSampleRate: z.number().default(16000),
@@ -37,6 +53,7 @@ const configSchema = z.object({
     maxRows: z.number().min(100).max(1_000_000).default(100_000),
   }),
   providers: z.array(z.enum(PROVIDER_IDS)),
+  voice: voiceSchema.optional(),
   jobs: z
     .object({
       maxParallel: z.number().min(1).max(64).default(4),

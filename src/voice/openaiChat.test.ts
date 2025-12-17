@@ -64,7 +64,7 @@ describe('generateChatReply', () => {
     });
     vi.stubGlobal('fetch', fetchMock as any);
 
-    const reply = await generateChatReply([{ role: 'system', content: 'sys' }], { lang: 'ja-JP' });
+    const reply = await generateChatReply([{ role: 'system', content: 'sys' }]);
     expect(reply).toBe('ok');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

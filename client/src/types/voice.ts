@@ -1,9 +1,12 @@
 export type VoiceState = 'listening' | 'thinking' | 'speaking';
 
+export type VoiceInputSource = 'mic' | 'meeting';
+
 export interface VoiceSessionMessage {
   type: 'voice_session';
   sessionId: string;
   startedAt: string;
+  presetId?: string;
   inputSampleRate: number;
   outputAudioSpec: { sampleRate: number; channels: number; format: string };
   sttProvider: string;
@@ -23,6 +26,8 @@ export interface VoiceUserTranscriptMessage {
   isFinal: boolean;
   text: string;
   timestamp: number;
+  source?: VoiceInputSource;
+  speakerId?: string;
 }
 
 export interface VoiceAssistantTextMessage {
@@ -73,14 +78,21 @@ export interface VoiceClientConfigMessage {
   pcm: true;
   clientSampleRate: number;
   enableInterim?: boolean;
+  presetId?: string;
+  channels?: number;
+  channelSplit?: boolean;
   options?: {
     finalizeDelayMs?: number;
+    meetingMode?: boolean;
+    meetingRequireWakeWord?: boolean;
+    wakeWords?: readonly string[];
   };
 }
 
 export interface VoiceClientCommandMessage {
   type: 'command';
   name: 'barge_in' | 'stop_speaking' | 'reset_history';
+  playedMs?: number;
 }
 
 export interface VoicePongMessage {

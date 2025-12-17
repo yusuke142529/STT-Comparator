@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, afterEach } from 'vitest';
+import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 describe('handleVoiceConnection', () => {
@@ -17,6 +17,7 @@ describe('handleVoiceConnection', () => {
 
   const state = vi.hoisted(() => {
     let onDataHandler: ((t: any) => void) | null = null;
+    let onDataHandlers: Array<(t: any) => void> = [];
     let chatQueue: Array<() => Promise<string>> = [];
     const chatSignals: AbortSignal[] = [];
     const chatSnapshots: unknown[] = [];
@@ -40,8 +41,10 @@ describe('handleVoiceConnection', () => {
       controller,
       setOnData: (cb: (t: any) => void) => {
         onDataHandler = cb;
+        onDataHandlers.push(cb);
       },
       getOnData: () => onDataHandler,
+      getOnDataAll: () => onDataHandlers.slice(),
       setChatQueue: (queue: Array<() => Promise<string>>) => {
         chatQueue = [...queue];
       },
@@ -50,11 +53,49 @@ describe('handleVoiceConnection', () => {
       generateChatReply,
       reset: () => {
         onDataHandler = null;
+        onDataHandlers = [];
         chatQueue = [];
         chatSignals.length = 0;
         chatSnapshots.length = 0;
       },
     };
+  });
+
+  const realtimeState = vi.hoisted(() => {
+    let handlers: any = null;
+    const session = {
+      ready: Promise.resolve(),
+      appendAudio: vi.fn(async () => {}),
+      cancelResponse: vi.fn(async () => {}),
+      truncateOutputAudio: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    };
+    return {
+      session,
+      setHandlers: (h: any) => {
+        handlers = h;
+      },
+      getHandlers: () => handlers,
+      reset: () => {
+        handlers = null;
+        session.appendAudio.mockClear();
+        session.cancelResponse.mockClear();
+        session.truncateOutputAudio.mockClear();
+        session.close.mockClear();
+      },
+    };
+  });
+
+  const envSnapshot = {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    ELEVENLABS_TTS_VOICE_ID: process.env.ELEVENLABS_TTS_VOICE_ID,
+  };
+
+  beforeEach(() => {
+    process.env.OPENAI_API_KEY = 'test-openai';
+    process.env.ELEVENLABS_API_KEY = 'test-elevenlabs';
+    process.env.ELEVENLABS_TTS_VOICE_ID = 'voice-123';
   });
 
   vi.mock('../config.js', () => ({
@@ -84,6 +125,14 @@ describe('handleVoiceConnection', () => {
 
   vi.mock('../voice/openaiChat.js', () => ({
     generateChatReply: state.generateChatReply,
+    getOpenAiChatUrl: () => 'https://api.openai.com/v1/chat/completions',
+  }));
+
+  vi.mock('../voice/openaiRealtimeVoice.js', () => ({
+    startOpenAiRealtimeVoiceSession: vi.fn((_opts: unknown, handlers: unknown) => {
+      realtimeState.setHandlers(handlers);
+      return realtimeState.session;
+    }),
   }));
 
   vi.mock('../voice/elevenlabsTts.js', () => ({
@@ -102,7 +151,11 @@ describe('handleVoiceConnection', () => {
   }));
 
   afterEach(() => {
+    process.env.OPENAI_API_KEY = envSnapshot.OPENAI_API_KEY;
+    process.env.ELEVENLABS_API_KEY = envSnapshot.ELEVENLABS_API_KEY;
+    process.env.ELEVENLABS_TTS_VOICE_ID = envSnapshot.ELEVENLABS_TTS_VOICE_ID;
     state.reset();
+    realtimeState.reset();
     vi.clearAllMocks();
     vi.useRealTimers();
   });
@@ -150,6 +203,219 @@ describe('handleVoiceConnection', () => {
     expect(binaries.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('uses 24kHz output when OpenAI STT is selected (pipeline mode)', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 48000, presetId: 'openai' })),
+      false
+    );
+
+    for (let i = 0; i < 10; i += 1) {
+      await Promise.resolve();
+    }
+
+    const json = parseJsonMessages(ws);
+    const sessionMsg = json.find((m) => m.type === 'voice_session');
+    expect(sessionMsg).toBeDefined();
+    expect(sessionMsg.outputAudioSpec?.sampleRate).toBe(24000);
+
+    const adapters = await import('../adapters/index.js');
+    const getAdapterMock = adapters.getAdapter as unknown as { mock: { results: Array<{ value: any }> } };
+    const adapterInstance = getAdapterMock.mock.results.at(-1)?.value as { startStreaming?: any } | undefined;
+    expect(adapterInstance?.startStreaming).toBeDefined();
+    expect(adapterInstance?.startStreaming).toHaveBeenCalledWith(expect.objectContaining({ sampleRateHz: 24000 }));
+
+    ws.close();
+  });
+
+  it('supports meeting channelSplit by starting two STT sessions', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: { finalizeDelayMs: 0, meetingMode: true, meetingRequireWakeWord: false },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[0]?.({ isFinal: true, text: 'マイク側の発話', provider: 'elevenlabs' });
+    handlers[1]?.({ isFinal: true, text: '会議側の発話', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const json = parseJsonMessages(ws);
+    const finals = json.filter((m) => m.type === 'voice_user_transcript' && m.isFinal === true);
+    expect(finals.some((m) => m.source === 'mic')).toBe(true);
+    expect(finals.some((m) => m.source === 'meeting')).toBe(true);
+  });
+
+  it('does not trigger a reply from meeting transcripts without wake words (barge-in)', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: { finalizeDelayMs: 0, meetingMode: true },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[0]?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+
+    for (let i = 0; i < 10; i += 1) {
+      await flushMicrotasks();
+      const json = parseJsonMessages(ws);
+      if (json.some((m) => m.type === 'voice_assistant_audio_start')) break;
+      vi.advanceTimersByTime(50);
+    }
+
+    expect(state.generateChatReply).toHaveBeenCalledTimes(1);
+
+    handlers[1]?.({ isFinal: true, text: '会議側の発話', provider: 'elevenlabs' });
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'command', name: 'barge_in' })), false);
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+    vi.advanceTimersByTime(1000);
+    await flushMicrotasks();
+
+    expect(state.generateChatReply).toHaveBeenCalledTimes(1);
+
+    const json = parseJsonMessages(ws);
+    expect(json.some((m) => m.type === 'voice_user_transcript' && m.isFinal === true && m.source === 'meeting')).toBe(true);
+  });
+
+  it('does not match wake words inside other words in meeting mode', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'en-US');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: { finalizeDelayMs: 0, meetingMode: true },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    // "said" contains "ai" but should not be treated as a wake word.
+    handlers[1]?.({ isFinal: true, text: 'said', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    expect(state.generateChatReply).toHaveBeenCalledTimes(0);
+
+    // Actual wake-word usage should still trigger a reply (word boundary match).
+    handlers[1]?.({ isFinal: true, text: 'AI, hello', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+    vi.advanceTimersByTime(1000);
+    await flushMicrotasks();
+
+    expect(state.generateChatReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves meeting system prompt across reset_history', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: { finalizeDelayMs: 0, meetingMode: true },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[0]?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'command', name: 'reset_history' })), false);
+    await flushMicrotasks();
+
+    handlers[0]?.({ isFinal: true, text: '次の発話', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const snapshots = state.getChatSnapshots();
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    const first = snapshots[0] as Array<{ role: string; content: string }>;
+    const second = snapshots[1] as Array<{ role: string; content: string }>;
+    expect(first[0]?.role).toBe('system');
+    expect(first[0]?.content).toContain('あなたはWeb会議に参加しています');
+    expect(second[0]?.role).toBe('system');
+    expect(second[0]?.content).toContain('あなたはWeb会議に参加しています');
+  });
+
   it('supports barge-in by aborting assistant speech', async () => {
     vi.useFakeTimers();
     const { handleVoiceConnection } = await import('./voiceHandler.js');
@@ -176,6 +442,55 @@ describe('handleVoiceConnection', () => {
 
     const json = parseJsonMessages(ws);
     expect(json.some((m) => m.type === 'voice_assistant_audio_end' && m.reason === 'barge_in')).toBe(true);
+  });
+
+  it('resets history by stopping assistant speech and clearing context', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { finalizeDelayMs: 0 } })),
+      false
+    );
+
+    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
+      await Promise.resolve();
+    }
+
+    state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    for (let i = 0; i < 10; i += 1) {
+      await flushMicrotasks();
+      const json = parseJsonMessages(ws);
+      if (json.some((m) => m.type === 'voice_assistant_audio_start')) break;
+    }
+
+    const beforeResetBinaries = ws.sent.filter((m): m is Buffer => Buffer.isBuffer(m));
+    expect(beforeResetBinaries.length).toBe(1);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'command', name: 'reset_history' })), false);
+    vi.advanceTimersByTime(1000);
+    await flushMicrotasks();
+
+    const json = parseJsonMessages(ws);
+    expect(json.some((m) => m.type === 'voice_assistant_audio_end' && m.reason === 'stopped')).toBe(true);
+
+    const afterResetBinaries = ws.sent.filter((m): m is Buffer => Buffer.isBuffer(m));
+    expect(afterResetBinaries.length).toBe(1);
+
+    state.getOnData()?.({ isFinal: true, text: '次の発話', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const snapshots = state.getChatSnapshots();
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    const second = snapshots[1] as Array<{ role: string; content: string }>;
+    expect(second.length).toBe(2); // system + current user
+    expect(second[1]?.role).toBe('user');
+    expect(second[1]?.content).toBe('次の発話');
   });
 
   it('aborts thinking turns without clobbering the next assistant turn', async () => {
@@ -286,5 +601,68 @@ describe('handleVoiceConnection', () => {
         process.env.VOICE_HISTORY_MAX_TURNS = prev;
       }
     }
+  });
+
+  it('ignores OpenAI Realtime audio deltas for mismatched responseId', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, presetId: 'openai_realtime' })),
+      false
+    );
+
+    for (let i = 0; i < 10 && !realtimeState.getHandlers(); i += 1) {
+      await Promise.resolve();
+    }
+
+    const handlers = realtimeState.getHandlers();
+    expect(handlers).toBeTruthy();
+
+    handlers.onResponseCreated?.({ responseId: 'r1' });
+    handlers.onAssistantAudioDelta?.({ responseId: 'r2', itemId: 'item2', pcm: Buffer.from([1, 2, 3, 4]) });
+    await flushMicrotasks();
+
+    const binaries = ws.sent.filter((m): m is Buffer => Buffer.isBuffer(m));
+    expect(binaries.length).toBe(0);
+
+    const json = parseJsonMessages(ws);
+    expect(json.some((m) => m.type === 'voice_assistant_audio_start')).toBe(false);
+  });
+
+  it('uses playedMs to truncate OpenAI Realtime output on stop_speaking', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, presetId: 'openai_realtime' })),
+      false
+    );
+
+    for (let i = 0; i < 10 && !realtimeState.getHandlers(); i += 1) {
+      await Promise.resolve();
+    }
+
+    const handlers = realtimeState.getHandlers();
+    expect(handlers).toBeTruthy();
+
+    handlers.onResponseCreated?.({ responseId: 'r1' });
+    handlers.onAssistantAudioDelta?.({ responseId: 'r1', itemId: 'item1', pcm: Buffer.alloc(4800) }); // ~100ms @ 24kHz mono PCM16
+    await flushMicrotasks();
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'command', name: 'stop_speaking', playedMs: 50 })), false);
+    await flushMicrotasks();
+
+    expect(realtimeState.session.truncateOutputAudio).toHaveBeenCalledWith('item1', 50);
+    expect(realtimeState.session.cancelResponse).toHaveBeenCalled();
+
+    const json = parseJsonMessages(ws);
+    expect(json.some((m) => m.type === 'voice_assistant_audio_end' && m.reason === 'stopped')).toBe(true);
   });
 });
