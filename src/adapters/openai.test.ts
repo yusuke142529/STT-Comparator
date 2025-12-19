@@ -49,7 +49,7 @@ describe('OpenAIAdapter streaming', () => {
     const adapter = new OpenAIAdapter();
     await adapter.startStreaming({
       language: 'en',
-      sampleRateHz: 16000,
+      sampleRateHz: 24000,
       encoding: 'linear16',
     });
 
@@ -69,7 +69,7 @@ describe('OpenAIAdapter streaming', () => {
     const adapter = new OpenAIAdapter();
     await adapter.startStreaming({
       language: 'en',
-      sampleRateHz: 16000,
+      sampleRateHz: 24000,
       encoding: 'linear16',
     });
 
@@ -87,7 +87,7 @@ describe('OpenAIAdapter streaming', () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({
       language: 'en',
-      sampleRateHz: 16000,
+      sampleRateHz: 24000,
       encoding: 'linear16',
       contextPhrases: ['alpha', 'beta'],
       dictionaryPhrases: ['beta', 'gamma'],
@@ -101,6 +101,15 @@ describe('OpenAIAdapter streaming', () => {
 
     const seen: Array<{ text: string; speakerId?: string }> = [];
     session.onData((t) => seen.push({ text: t.text, speakerId: t.speakerId }));
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'input_audio_buffer.committed',
+        item_id: 'item-1',
+        previous_item_id: 'root',
+      })
+    );
 
     ws.emit(
       'message',
@@ -130,7 +139,7 @@ describe('OpenAIAdapter streaming', () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({
       language: 'en',
-      sampleRateHz: 16000,
+      sampleRateHz: 24000,
       encoding: 'linear16',
     });
 
@@ -152,6 +161,15 @@ describe('OpenAIAdapter streaming', () => {
 
     const pcm = new Int16Array([1000, -1000]); // 2 samples
     await session.controller.sendAudio(Buffer.from(pcm.buffer));
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'input_audio_buffer.committed',
+        item_id: 'item-1',
+        previous_item_id: 'root',
+      })
+    );
 
     const audioSend = ws.sent.find((m) => typeof m === 'string' && m.includes('input_audio_buffer.append')) as string;
     expect(audioSend).toBeDefined();
@@ -194,7 +212,7 @@ describe('OpenAIAdapter streaming', () => {
     const adapter = new OpenAIAdapter();
     await adapter.startStreaming({
       language: 'ja-JP',
-      sampleRateHz: 16000,
+      sampleRateHz: 24000,
       encoding: 'linear16',
     });
 
@@ -210,7 +228,7 @@ describe('OpenAIAdapter streaming', () => {
     const adapter = new OpenAIAdapter();
     const session = await adapter.startStreaming({
       language: 'en',
-      sampleRateHz: 16000,
+      sampleRateHz: 24000,
       encoding: 'linear16',
     });
 
@@ -228,6 +246,95 @@ describe('OpenAIAdapter streaming', () => {
       (m) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit'
     );
     expect(hasCommit).toBe(true);
+  });
+
+  it('does not drop buffered audio when committed arrives after new audio', async () => {
+    const adapter = new OpenAIAdapter();
+    const session = await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 24000,
+      encoding: 'linear16',
+    });
+
+    const ws = wsState.instances.at(-1);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const countCommits = () =>
+      ws.sent.filter((m) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit').length;
+
+    await session.controller.sendAudio(Buffer.from(new Int16Array([1, -1]).buffer));
+    await session.controller.end();
+    expect(countCommits()).toBe(1);
+
+    await session.controller.sendAudio(Buffer.from(new Int16Array([2, -2]).buffer));
+
+    // Simulate a late commit ack for the previous turn arriving after the next audio append.
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'input_audio_buffer.committed',
+        item_id: 'item-old',
+        previous_item_id: 'root',
+      })
+    );
+
+    await session.controller.end();
+    expect(countCommits()).toBe(2);
+  });
+
+  it('emits completed transcripts in committed order even when completions arrive out of order', async () => {
+    const adapter = new OpenAIAdapter();
+    const session = await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 24000,
+      encoding: 'linear16',
+    });
+
+    const ws = wsState.instances.at(-1);
+    expect(ws).toBeDefined();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const finals: string[] = [];
+    session.onData((t) => {
+      if (t.isFinal) finals.push(t.text);
+    });
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'input_audio_buffer.committed',
+        item_id: 'item-1',
+        previous_item_id: 'root',
+      })
+    );
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'input_audio_buffer.committed',
+        item_id: 'item-2',
+        previous_item_id: 'item-1',
+      })
+    );
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-2',
+        transcript: 'second',
+      })
+    );
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-1',
+        transcript: 'first',
+      })
+    );
+
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finals).toEqual(['first', 'second']);
   });
 });
 

@@ -1,7 +1,9 @@
 import { WebSocket } from 'ws';
 import type { RawData } from 'ws';
 import { logger } from '../logger.js';
+import type { VadConfig } from '../types.js';
 import { normalizeIsoLanguageCode } from '../utils/language.js';
+import { resolveVadConfig } from '../utils/vad.js';
 
 const OPENAI_REALTIME_DEBUG = process.env.OPENAI_REALTIME_DEBUG === 'true';
 const OPENAI_PING_INTERVAL_MS = 15_000;
@@ -97,12 +99,13 @@ function getRealtimeWsUrl(model: string): string {
   return url.toString();
 }
 
-function getTurnDetection(): Record<string, unknown> {
+function getTurnDetection(vad?: VadConfig): Record<string, unknown> {
+  const resolved = resolveVadConfig(vad);
   return {
     type: 'server_vad',
-    silence_duration_ms: 500,
-    prefix_padding_ms: 300,
-    threshold: 0.5,
+    silence_duration_ms: resolved.silenceDurationMs,
+    prefix_padding_ms: resolved.prefixPaddingMs,
+    threshold: resolved.threshold,
     // Let the server start/cancel responses automatically when speech begins/ends.
     create_response: true,
     interrupt_response: true,
@@ -110,7 +113,14 @@ function getTurnDetection(): Record<string, unknown> {
 }
 
 export function startOpenAiRealtimeVoiceSession(
-  opts: { lang: string; systemPrompt: string; model?: string; transcriptionModel?: string; voice?: string },
+  opts: {
+    lang: string;
+    systemPrompt: string;
+    model?: string;
+    transcriptionModel?: string;
+    voice?: string;
+    vad?: VadConfig;
+  },
   handlers: OpenAiRealtimeVoiceHandlers
 ): OpenAiRealtimeVoiceSession {
   const apiKey = requireApiKey();
@@ -214,7 +224,7 @@ export function startOpenAiRealtimeVoiceSession(
                     language: language || undefined,
                     prompt: '',
                   },
-                  turn_detection: getTurnDetection(),
+                  turn_detection: getTurnDetection(opts.vad),
                 },
               },
             },

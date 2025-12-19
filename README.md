@@ -67,6 +67,7 @@ UI の「音声会話」タブは、マイク入力 → STT → LLM → TTS → 
   - `deepgram`: `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`
 - ヘルス: `GET /api/voice/status`
 - WS: `/ws/voice?lang=ja-JP`
+- VAD調整: `config.json` の `voice.vad` で閾値/無音長/プレフィックスを調整（音声会話のみ影響、Realtime比較には影響しません）。
 - 参考: `voice_assistant_audio_start` に `llmMs` / `ttsTtfbMs` が含まれ、UI に表示されます（体感遅延の内訳確認に利用）。
 - 日本語品質: `lang` が `ja-*` で `ELEVENLABS_TTS_MODEL_ID` 未設定の場合は `eleven_multilingual_v2` を自動適用（アカウント/モデル非対応時は自動で無指定にフォールバック）。
 - 速度調整: `ELEVENLABS_TTS_OPTIMIZE_STREAMING_LATENCY`（例: `3`）で ElevenLabs の初動レイテンシをチューニングできます。
@@ -112,7 +113,7 @@ Google Meet（ブラウザ版）のタブ音声を取り込み、さらに **AI�
 ### OpenAI Realtime / Transcribe（GPT-4o）
 
 - `.env` に `OPENAI_API_KEY` を設定すると Realtime/Bulk の両方で `openai` プロバイダが利用可能になります。キー未設定時は `/api/providers` が unavailable と返し、UI で選択不可になります。
-- ストリーミングは OpenAI Realtime API（intent=transcription, model=`gpt-4o-transcribe` 既定）を利用します。API が 24kHz PCM を要求するため、サーバ側で 16kHz → 24kHz にアップサンプリングして送出し、処理時間に含めます。VAD は server_vad（デフォルトON, `enableVad=false` で無効）。
+- ストリーミングは OpenAI Realtime API（intent=transcription, model=`gpt-4o-transcribe` 既定）を利用します。API が 24kHz PCM を要求するため、必要に応じてサーバ側で 16kHz → 24kHz にアップサンプリングして送出し、処理時間に含めます。VAD は公平比較のため既定OFF（`enableVad=true` で server_vad を有効化）。
 - バッチは Audio Transcriptions API（model=`gpt-4o-transcribe` 既定）に WAV ラップした 16kHz PCM を multipart で送信し、word-level timestamps が返れば UI/CSV に反映されます。
 - モデルは環境変数で切替可能: `OPENAI_STREAMING_MODEL`, `OPENAI_BATCH_MODEL`（例: `gpt-4o-mini-transcribe`）。
 

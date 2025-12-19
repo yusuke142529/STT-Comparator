@@ -21,6 +21,12 @@ export interface EffectiveAudioSpec {
   format: 'pcm16le';
 }
 
+export type VadConfig = {
+  threshold?: number;
+  silenceDurationMs?: number;
+  prefixPaddingMs?: number;
+};
+
 export interface StreamingOptions {
   language: string;
   sampleRateHz: number;
@@ -36,6 +42,8 @@ export interface StreamingOptions {
   contextPhrases?: readonly string[];
   punctuationPolicy?: PunctuationPolicy;
   enableVad?: boolean;
+  /** Optional provider VAD tuning (when provider supports server VAD). */
+  vad?: VadConfig;
   dictionaryPhrases?: readonly string[];
   normalizePreset?: string;
   parallel?: number;
@@ -416,6 +424,8 @@ export interface AppConfig {
       sttProvider: ProviderId;
       ttsProvider: ProviderId;
     }>;
+    /** Voice-only VAD tuning (does not affect realtime comparison). */
+    vad?: VadConfig;
     /** Default preset id used when the client does not specify one. */
     defaultPresetId?: string;
   };

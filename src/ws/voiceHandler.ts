@@ -45,23 +45,26 @@ function getHistoryMaxTurns(): number {
   return 12;
 }
 
-function stripWakeWord(text: string, wakeWords: readonly string[]) {
+function stripWakeWordPrefix(text: string, wakeWords: readonly string[]): { matched: boolean; cleaned: string } {
   const trimmed = text.trim();
-  if (!trimmed) return trimmed;
+  if (!trimmed) return { matched: false, cleaned: trimmed };
   const lower = trimmed.toLowerCase();
   for (const w of wakeWords) {
     const token = w.trim();
     if (!token) continue;
-    const idx = lower.indexOf(token.toLowerCase());
-    if (idx !== 0) continue;
+    const lowerToken = token.toLowerCase();
+    if (!lower.startsWith(lowerToken)) continue;
+    // For ASCII tokens, require a word boundary after the wake word (e.g., "ai" should not match "aiden").
+    if (/^[a-z0-9]+$/i.test(token)) {
+      const nextChar = trimmed.slice(token.length, token.length + 1);
+      if (nextChar && /[a-z0-9]/i.test(nextChar)) {
+        continue;
+      }
+    }
     const rest = trimmed.slice(token.length).replace(/^[\s,、:：-]+/, '').trim();
-    return rest || trimmed;
+    return { matched: true, cleaned: rest || trimmed };
   }
-  return trimmed;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return { matched: false, cleaned: trimmed };
 }
 
 function defaultWakeWords(lang: string): string[] {
@@ -74,6 +77,7 @@ function defaultWakeWords(lang: string): string[] {
 
 export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   const config = await loadConfig();
+  const voiceVad = config.voice?.vad;
   const sessionId = randomUUID();
   const startedAt = new Date().toISOString();
   const keepaliveMs = config.ws?.keepaliveMs ?? 30_000;
@@ -258,15 +262,17 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       const parts = suppressedFinalParts.splice(0);
       let shouldFinalize = false;
       for (const part of parts) {
+        const text = normalizeUserText(part.source, part.text);
+        if (!text) continue;
         const msg: VoiceUserTranscriptMessage = {
           type: 'voice_user_transcript',
           isFinal: true,
-          text: part.text,
+          text,
           timestamp: Date.now(),
           source: part.source,
         };
         sendJson(msg);
-        if (maybeEnqueueFinalPart(part.source, part.text)) {
+        if (enqueueFinalPart(part.source, text)) {
           shouldFinalize = true;
         }
       }
@@ -274,10 +280,15 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
         scheduleFinalize();
       }
     } else if (suppressedInterim) {
+      const text = normalizeUserText(suppressedInterim.source, suppressedInterim.text);
+      if (!text) {
+        clearSuppressedTranscripts();
+        return;
+      }
       const msg: VoiceUserTranscriptMessage = {
         type: 'voice_user_transcript',
         isFinal: false,
-        text: suppressedInterim.text,
+        text,
         timestamp: Date.now(),
         source: suppressedInterim.source,
       };
@@ -476,16 +487,6 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   let meetingModeEnabled = false;
   let meetingRequireWakeWord = false;
   let wakeWords: string[] = [];
-  let wakeWordMatchers: Array<{ kind: 'boundary'; pattern: RegExp } | { kind: 'includes'; token: string }> = [];
-
-  const matchesWakeWord = (text: string) => {
-    if (wakeWordMatchers.length === 0) return false;
-    const lower = text.toLowerCase();
-    return wakeWordMatchers.some((matcher) => {
-      if (matcher.kind === 'boundary') return matcher.pattern.test(text);
-      return matcher.token.length > 0 && lower.includes(matcher.token);
-    });
-  };
 
   const meetingSystemPromptSuffix =
     '\n\nあなたはWeb会議に参加しています。ユーザー発話には [me] (このPCのマイク) と [meeting] (会議タブ音声) のラベルが付くことがあります。会議の妨げにならないよう、簡潔に返答してください。';
@@ -506,12 +507,18 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     return source === 'meeting' ? `[meeting] ${text}` : `[me] ${text}`;
   };
 
-  const maybeEnqueueFinalPart = (source: VoiceInputSource, text: string) => {
+  const normalizeUserText = (source: VoiceInputSource, text: string): string | null => {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    if (source !== 'meeting' || !meetingRequireWakeWord) return trimmed;
+    const stripped = stripWakeWordPrefix(trimmed, wakeWords);
+    if (!stripped.matched) return null;
+    return stripped.cleaned.trim();
+  };
+
+  const enqueueFinalPart = (source: VoiceInputSource, text: string) => {
     if (!text) return false;
-    const gated = source === 'meeting' && meetingRequireWakeWord && !matchesWakeWord(text);
-    if (gated) return false;
-    const cleaned = source === 'meeting' && meetingRequireWakeWord ? stripWakeWord(text, wakeWords) : text;
-    pendingFinalParts.push(formatHistoryText(source, cleaned, meetingModeEnabled));
+    pendingFinalParts.push(formatHistoryText(source, text, meetingModeEnabled));
     return true;
   };
 
@@ -526,6 +533,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       {
         lang,
         systemPrompt,
+        vad: voiceVad,
       },
       {
         onSpeechStarted: () => {
@@ -707,18 +715,6 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     if (wakeWords.length === 0) {
       wakeWords = defaultWakeWords(lang);
     }
-    wakeWordMatchers = wakeWords
-      .map((w) => {
-        const token = w.trim();
-        if (!token) return null;
-        const lowerToken = token.toLowerCase();
-        // For ASCII tokens, require word boundaries (e.g., "ai" should not match "said").
-        if (/^[a-z0-9]+$/i.test(token)) {
-          return { kind: 'boundary' as const, pattern: new RegExp(`\\b${escapeRegExp(lowerToken)}\\b`, 'i') };
-        }
-        return { kind: 'includes' as const, token: lowerToken };
-      })
-      .filter((m): m is NonNullable<(typeof wakeWordMatchers)[number]> => Boolean(m));
     meetingRequireWakeWord = msg.options?.meetingRequireWakeWord ?? meetingModeEnabled;
     applyMeetingSystemPrompt();
 
@@ -775,7 +771,8 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
 
     const handleSttTranscript = (source: VoiceInputSource, t: { isFinal: boolean; text: string; speakerId?: string }) => {
       if (closed) return;
-      const text = t.text.trim();
+      const text = normalizeUserText(source, t.text);
+      if (!text) return;
 
       // If the user starts talking while the assistant is still thinking, abort the in-flight turn.
       if (assistantTurn?.state === 'thinking' && text) {
@@ -799,11 +796,9 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
         source,
         speakerId: t.speakerId,
       };
-      if (text) {
-        sendJson(msgPayload);
-      }
+      sendJson(msgPayload);
       if (t.isFinal && text) {
-        if (maybeEnqueueFinalPart(source, text)) {
+        if (enqueueFinalPart(source, text)) {
           scheduleFinalize();
         }
       }
@@ -817,6 +812,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
           encoding: 'linear16',
           enableInterim,
           enableVad: true,
+          vad: voiceVad,
         });
         sttControllers.set(source, sttSession.controller);
         sttSession.onData((t) => handleSttTranscript(source, t));

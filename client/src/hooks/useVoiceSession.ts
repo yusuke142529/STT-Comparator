@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import pcmWorkletUrl from '../audio/pcmWorklet.js?url';
+import { PcmPlayer, DEFAULT_OUTPUT_SAMPLE_RATE } from '../audio/pcmPlayer';
 import { STREAM_HEADER_BYTES } from '../utils/streamHeader';
 import type {
   VoiceClientConfigMessage,
@@ -27,15 +28,21 @@ type VoiceTimings = {
 };
 
 const DEFAULT_CHUNK_MS = 50;
-const DEFAULT_OUTPUT_SAMPLE_RATE = 16000;
 const DEFAULT_WAKE_WORDS = ['アシスタント', 'assistant', 'AI'];
+const ASSISTANT_RMS_ALPHA = 0.12;
+const ASSISTANT_ECHO_WARMUP_MS = 800;
+const ASSISTANT_ECHO_WARMUP_FRAMES = 14;
+const ASSISTANT_ECHO_GUARD_FACTOR = 1.8;
+const PREROLL_MAX_MS = 1200;
+const RMS_UPDATE_INTERVAL_MS = 120;
 
-const buildMicConstraints = (): MediaTrackConstraints | boolean => {
+const buildMicConstraints = (deviceId?: string): MediaTrackConstraints | boolean => {
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getSupportedConstraints) {
-    return true;
+    return deviceId ? { deviceId: { exact: deviceId } } : true;
   }
   const supported = navigator.mediaDevices.getSupportedConstraints();
   const constraints: MediaTrackConstraints = {};
+  if (deviceId) constraints.deviceId = { exact: deviceId };
   if (supported.channelCount) constraints.channelCount = 1;
   // Voice mode prioritizes practical UX (echo cancellation + noise suppression) over fairness benchmarking.
   if (supported.echoCancellation) constraints.echoCancellation = true;
@@ -44,203 +51,6 @@ const buildMicConstraints = (): MediaTrackConstraints | boolean => {
   if (supported.sampleSize) constraints.sampleSize = 16;
   return Object.keys(constraints).length > 0 ? constraints : true;
 };
-
-class PcmPlayer {
-  private ctx: AudioContext | null = null;
-  private monitorGain: GainNode | null = null;
-  private meetGain: GainNode | null = null;
-  private micMeetGain: GainNode | null = null;
-  private nextTime = 0;
-  private scheduled: AudioBufferSourceNode[] = [];
-  private sampleRate = DEFAULT_OUTPUT_SAMPLE_RATE;
-  private firstScheduledTime: number | null = null;
-  private scheduledDurationSec = 0;
-  private meetDestination: MediaStreamAudioDestinationNode | null = null;
-  private meetElement: HTMLAudioElement | null = null;
-  private micSource: MediaStreamAudioSourceNode | null = null;
-  private monitorEnabled = true;
-  private meetEnabled = false;
-
-  ensure(sampleRate: number) {
-    this.sampleRate = sampleRate;
-    if (!this.ctx) {
-      const context = new AudioContext({ latencyHint: 'interactive' });
-      this.ctx = context;
-      this.monitorGain = context.createGain();
-      this.monitorGain.gain.value = 1;
-      this.monitorGain.connect(context.destination);
-
-      this.meetGain = context.createGain();
-      this.meetGain.gain.value = 0;
-      this.meetDestination = context.createMediaStreamDestination();
-      this.meetGain.connect(this.meetDestination);
-
-      this.micMeetGain = context.createGain();
-      this.micMeetGain.gain.value = 1;
-      this.micMeetGain.connect(this.meetGain);
-
-      if (typeof document !== 'undefined') {
-        const el = document.createElement('audio');
-        el.autoplay = true;
-        el.playsInline = true;
-        el.muted = false;
-        el.style.display = 'none';
-        el.srcObject = this.meetDestination.stream;
-        document.body.appendChild(el);
-        this.meetElement = el;
-      }
-      this.nextTime = context.currentTime + 0.05;
-    }
-    return this.ctx;
-  }
-
-  getPlayedMs() {
-    if (!this.ctx || this.firstScheduledTime === null) return 0;
-    const playedSec = this.ctx.currentTime - this.firstScheduledTime;
-    const clamped = Math.max(0, Math.min(this.scheduledDurationSec, playedSec));
-    return Math.round(clamped * 1000);
-  }
-
-  setMonitorEnabled(enabled: boolean) {
-    this.monitorEnabled = enabled;
-    if (this.monitorGain) {
-      this.monitorGain.gain.value = enabled ? 1 : 0;
-    }
-  }
-
-  async setMeetOutput(enabled: boolean, deviceId?: string) {
-    this.meetEnabled = enabled;
-    if (this.meetGain) {
-      this.meetGain.gain.value = enabled ? 1 : 0;
-    }
-    const el = this.meetElement;
-    if (!el) return;
-
-    if (enabled && deviceId) {
-      const media = el as HTMLMediaElement & { setSinkId?: (sinkId: string) => Promise<void> };
-      if (typeof media.setSinkId !== 'function') {
-        throw new Error('このブラウザは setSinkId に未対応です（Meet への音声出力には Chrome/Edge 推奨）');
-      }
-      await media.setSinkId(deviceId);
-    }
-
-    if (enabled) {
-      await el.play().catch(() => undefined);
-    } else {
-      el.pause();
-    }
-  }
-
-  setMicStream(stream: MediaStream | null, opts?: { toMeet?: boolean }) {
-    if (!this.ctx) return;
-    if (this.micSource) {
-      try {
-        this.micSource.disconnect();
-      } catch {
-        // ignore
-      }
-      this.micSource = null;
-    }
-    if (!stream) return;
-    const source = this.ctx.createMediaStreamSource(stream);
-    this.micSource = source;
-    if (opts?.toMeet && this.micMeetGain) {
-      source.connect(this.micMeetGain);
-    }
-  }
-
-  enqueuePcm(buffer: ArrayBuffer) {
-    if (!this.ctx || !this.monitorGain || !this.meetGain) return;
-    const ctx = this.ctx;
-    const pcm = new Int16Array(buffer);
-    if (pcm.length === 0) return;
-    const float32 = new Float32Array(pcm.length);
-    for (let i = 0; i < pcm.length; i += 1) {
-      float32[i] = pcm[i] / 32768;
-    }
-    const audioBuffer = ctx.createBuffer(1, float32.length, this.sampleRate);
-    audioBuffer.copyToChannel(float32, 0);
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    if (this.monitorEnabled) {
-      source.connect(this.monitorGain);
-    }
-    if (this.meetEnabled) {
-      source.connect(this.meetGain);
-    }
-    const now = ctx.currentTime;
-    if (this.nextTime < now + 0.02) {
-      this.nextTime = now + 0.02;
-    }
-    if (this.firstScheduledTime === null) {
-      this.firstScheduledTime = this.nextTime;
-    }
-    source.start(this.nextTime);
-    this.nextTime += audioBuffer.duration;
-    this.scheduledDurationSec += audioBuffer.duration;
-    this.scheduled.push(source);
-    source.onended = () => {
-      this.scheduled = this.scheduled.filter((n) => n !== source);
-    };
-    void ctx.resume().catch(() => undefined);
-  }
-
-  clear() {
-    this.scheduled.forEach((node) => {
-      try {
-        node.stop();
-      } catch {
-        // ignore
-      }
-    });
-    this.scheduled = [];
-    this.firstScheduledTime = null;
-    this.scheduledDurationSec = 0;
-    if (this.ctx) {
-      this.nextTime = this.ctx.currentTime + 0.02;
-    }
-  }
-
-  async close() {
-    this.clear();
-    if (this.micSource) {
-      try {
-        this.micSource.disconnect();
-      } catch {
-        // ignore
-      }
-      this.micSource = null;
-    }
-    if (this.meetElement) {
-      const el = this.meetElement;
-      this.meetElement = null;
-      try {
-        el.pause();
-      } catch {
-        // ignore
-      }
-      try {
-        el.srcObject = null;
-      } catch {
-        // ignore
-      }
-      try {
-        el.remove();
-      } catch {
-        // ignore
-      }
-    }
-    if (this.ctx) {
-      const ctx = this.ctx;
-      this.ctx = null;
-      this.monitorGain = null;
-      this.meetGain = null;
-      this.micMeetGain = null;
-      this.meetDestination = null;
-      await ctx.close().catch(() => undefined);
-    }
-  }
-}
 
 function computeRms(pcm: ArrayBuffer): number {
   const samples = new Int16Array(pcm);
@@ -259,6 +69,7 @@ type VoiceMeetingStartOptions = {
   meetOutputDeviceId?: string;
   /** Plays assistant audio locally (default: true). */
   monitorAssistant?: boolean;
+  monitorOutputDeviceId?: string;
   meetingRequireWakeWord?: boolean;
   wakeWords?: readonly string[];
   presetMode?: 'pipeline' | 'openai_realtime';
@@ -266,6 +77,7 @@ type VoiceMeetingStartOptions = {
 
 type VoiceStartOptions = {
   presetId?: string;
+  micDeviceId?: string;
   meeting?: VoiceMeetingStartOptions;
 };
 
@@ -282,8 +94,11 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
   );
   const [lastTimings, setLastTimings] = useState<VoiceTimings | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isReady, setIsReady] = useState(false);
   const [outputSampleRate, setOutputSampleRate] = useState(DEFAULT_OUTPUT_SAMPLE_RATE);
+  const [micRms, setMicRms] = useState(0);
   const outputSampleRateRef = useRef(DEFAULT_OUTPUT_SAMPLE_RATE);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -298,8 +113,18 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
   const bargeCooldownUntilRef = useRef(0);
   const noiseEmaMicRef = useRef(0.005);
   const noiseEmaMeetingRef = useRef(0.005);
+  const micRmsEmaRef = useRef(0);
+  const lastRmsUpdateRef = useRef(0);
   const bargeAboveMicRef = useRef(0);
   const bargeAboveMeetingRef = useRef(0);
+  const assistantRmsEmaRef = useRef(0);
+  const assistantLeakRatioRef = useRef(0);
+  const assistantWarmupFramesRef = useRef(0);
+  const assistantStartMsRef = useRef(0);
+  const monitorAssistantRef = useRef(true);
+  const sessionReadyRef = useRef(false);
+  const prerollQueueRef = useRef<Array<{ packet: ArrayBuffer; durationMs: number }>>([]);
+  const prerollDurationMsRef = useRef(0);
 
   const stopMedia = useCallback(async () => {
     workletNodeRef.current?.disconnect();
@@ -323,6 +148,60 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     socket.send(JSON.stringify(payload));
   }, []);
 
+  const resetPreroll = useCallback(() => {
+    sessionReadyRef.current = false;
+    prerollQueueRef.current = [];
+    prerollDurationMsRef.current = 0;
+    setIsReady(false);
+  }, []);
+
+  const flushPreroll = useCallback(() => {
+    if (!sessionReadyRef.current) return;
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const queue = prerollQueueRef.current;
+    if (queue.length === 0) return;
+    queue.forEach(({ packet }) => {
+      socket.send(packet);
+    });
+    queue.length = 0;
+    prerollDurationMsRef.current = 0;
+  }, []);
+
+  const sendOrBufferPacket = useCallback(
+    (packet: ArrayBuffer, durationMs: number) => {
+      const socket = wsRef.current;
+      if (sessionReadyRef.current && socket && socket.readyState === WebSocket.OPEN) {
+        if (prerollQueueRef.current.length > 0) {
+          flushPreroll();
+        }
+        socket.send(packet);
+        return;
+      }
+      const safeDuration = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : DEFAULT_CHUNK_MS;
+      const queue = prerollQueueRef.current;
+      queue.push({ packet, durationMs: safeDuration });
+      prerollDurationMsRef.current += safeDuration;
+      while (prerollDurationMsRef.current > PREROLL_MAX_MS && queue.length > 0) {
+        const removed = queue.shift();
+        if (removed) {
+          prerollDurationMsRef.current -= removed.durationMs;
+        }
+      }
+    },
+    [flushPreroll]
+  );
+
+  const updateMicRms = useCallback((rms: number) => {
+    const next = micRmsEmaRef.current * 0.8 + rms * 0.2;
+    micRmsEmaRef.current = next;
+    const now = Date.now();
+    if (now - lastRmsUpdateRef.current >= RMS_UPDATE_INTERVAL_MS) {
+      lastRmsUpdateRef.current = now;
+      setMicRms(next);
+    }
+  }, []);
+
   const stopAll = useCallback(async () => {
     setIsRunning(false);
     wsRef.current?.close();
@@ -330,9 +209,18 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     speakingRef.current = false;
     bargeAboveMicRef.current = 0;
     bargeAboveMeetingRef.current = 0;
+    assistantRmsEmaRef.current = 0;
+    assistantLeakRatioRef.current = 0;
+    assistantWarmupFramesRef.current = 0;
+    assistantStartMsRef.current = 0;
+    resetPreroll();
+    micRmsEmaRef.current = 0;
+    lastRmsUpdateRef.current = 0;
+    setMicRms(0);
+    setWarning(null);
     await stopMedia();
     await playerRef.current.close();
-  }, [stopMedia]);
+  }, [resetPreroll, stopMedia]);
 
   useEffect(() => () => {
     void stopAll();
@@ -360,8 +248,34 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
       const noiseRef = source === 'meeting' ? noiseEmaMeetingRef : noiseEmaMicRef;
       const aboveRef = source === 'meeting' ? bargeAboveMeetingRef : bargeAboveMicRef;
       const noise = noiseRef.current;
-      const threshold = Math.max(0.02, noise * 3.5);
-      if (rms > threshold) {
+      const baseThreshold = Math.max(0.02, noise * 3.5);
+      let effectiveThreshold = baseThreshold;
+
+      if (source === 'mic' && monitorAssistantRef.current) {
+        const assistantRms = assistantRmsEmaRef.current;
+        if (assistantRms > 0) {
+          const now = Date.now();
+          if (
+            assistantStartMsRef.current > 0
+            && now - assistantStartMsRef.current < ASSISTANT_ECHO_WARMUP_MS
+            && assistantWarmupFramesRef.current < ASSISTANT_ECHO_WARMUP_FRAMES
+            && rms < baseThreshold * 1.5
+          ) {
+            const ratio = rms / (assistantRms + 1e-4);
+            const clamped = Math.max(0, Math.min(1, ratio));
+            const prev = assistantLeakRatioRef.current;
+            assistantLeakRatioRef.current = prev === 0 ? clamped : prev * 0.8 + clamped * 0.2;
+            assistantWarmupFramesRef.current += 1;
+          }
+          const leakRatio = assistantLeakRatioRef.current;
+          if (leakRatio > 0) {
+            const echoEstimate = assistantRms * leakRatio;
+            effectiveThreshold = Math.max(effectiveThreshold, echoEstimate * ASSISTANT_ECHO_GUARD_FACTOR);
+          }
+        }
+      }
+
+      if (rms > effectiveThreshold) {
         aboveRef.current += 1;
       } else {
         aboveRef.current = Math.max(0, aboveRef.current - 1);
@@ -382,12 +296,17 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
 
   const start = useCallback(async (opts?: VoiceStartOptions) => {
     setError(null);
+    setWarning(null);
     setMessages([]);
     setInterim(null);
     setLastTimings(null);
     setSessionId(null);
     setState('listening');
     setIsRunning(true);
+    resetPreroll();
+    micRmsEmaRef.current = 0;
+    lastRmsUpdateRef.current = 0;
+    setMicRms(0);
     speakingRef.current = false;
     bargeAboveMicRef.current = 0;
     bargeAboveMeetingRef.current = 0;
@@ -399,25 +318,52 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     const captureTabAudio = meeting?.captureTabAudio === true;
     const enableChannelSplit = presetMode === 'pipeline' && captureTabAudio;
     const monitorAssistant = meeting?.monitorAssistant !== false;
+    monitorAssistantRef.current = monitorAssistant;
+    const monitorOutputDeviceId = meeting?.monitorOutputDeviceId?.trim();
     const enableMeetOutput = meeting?.enableMeetOutput === true;
     const meetOutputDeviceId = meeting?.meetOutputDeviceId?.trim();
     const meetingRequireWakeWord = meeting?.meetingRequireWakeWord ?? true;
     const wakeWords = (meeting?.wakeWords ?? DEFAULT_WAKE_WORDS).map((w) => w.trim()).filter(Boolean);
+    const micDeviceId = opts?.micDeviceId?.trim();
 
     try {
       // Create/prime the playback AudioContext while we're still in the user gesture.
       const playbackContext = playerRef.current.ensure(outputSampleRateRef.current);
       void playbackContext.resume().catch(() => undefined);
-      playerRef.current.setMonitorEnabled(monitorAssistant);
+      const monitorResult = await playerRef.current.setMonitorOutput(monitorAssistant, monitorOutputDeviceId || undefined);
+      if (monitorResult?.warning) {
+        setWarning(monitorResult.warning);
+      }
 
       if (enableMeetOutput && !meetOutputDeviceId) {
         throw new Error('Meet 出力を有効にするには出力デバイスを選択してください（例: BlackHole）');
       }
       await playerRef.current.setMeetOutput(enableMeetOutput, meetOutputDeviceId ?? undefined);
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: buildMicConstraints() });
+      assistantRmsEmaRef.current = 0;
+      assistantLeakRatioRef.current = 0;
+      assistantWarmupFramesRef.current = 0;
+      assistantStartMsRef.current = 0;
+
+      const requestMicStream = async (deviceId?: string) => {
+        try {
+          return await navigator.mediaDevices.getUserMedia({ audio: buildMicConstraints(deviceId) });
+        } catch (err) {
+          if (deviceId) {
+            const name = (err as DOMException)?.name;
+            if (name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'NotReadableError') {
+              console.warn('voice mic selection failed, falling back to default device', err);
+              return await navigator.mediaDevices.getUserMedia({ audio: buildMicConstraints() });
+            }
+          }
+          throw err;
+        }
+      };
+
+      const stream = await requestMicStream(micDeviceId || undefined);
       streamRef.current = stream;
       playerRef.current.setMicStream(stream, { toMeet: enableMeetOutput });
+      playerRef.current.setMeetMicMuted(false);
 
       if (captureTabAudio && presetMode !== 'pipeline') {
         throw new Error('Meet タブ音声の取り込みは pipeline プリセットで利用してください');
@@ -429,6 +375,12 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
         if (!hasAudio) {
           meetingStream.getTracks().forEach((t) => t.stop());
           throw new Error('Meet タブ音声が取得できませんでした（タブ共有の「音声を共有」をONにしてください）');
+        }
+        const videoTrack = meetingStream.getVideoTracks()[0];
+        const displaySurface = videoTrack?.getSettings().displaySurface;
+        if (displaySurface && displaySurface !== 'browser') {
+          meetingStream.getTracks().forEach((t) => t.stop());
+          throw new Error('Meet タブ共有を選択してください（画面/ウィンドウ共有は誤認しやすいです）');
         }
         meetingStreamRef.current = meetingStream;
         meetingStream.getTracks().forEach((track) => {
@@ -541,11 +493,18 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             outputSampleRateRef.current = sampleRate;
             setOutputSampleRate(sampleRate);
             playerRef.current.ensure(sampleRate);
+            sessionReadyRef.current = true;
+            setIsReady(true);
+            flushPreroll();
             return;
           }
           if (payload.type === 'voice_state') {
             setState(payload.state);
             speakingRef.current = payload.state === 'speaking';
+            playerRef.current.setMeetMicMuted(enableMeetOutput && payload.state === 'speaking');
+            if (payload.state === 'speaking' && payload.turnId) {
+              playerRef.current.beginTurn(payload.turnId);
+            }
             if (payload.state !== 'speaking') {
               bargeAboveMicRef.current = 0;
               bargeAboveMeetingRef.current = 0;
@@ -587,6 +546,11 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
           if (payload.type === 'voice_assistant_audio_start') {
             speakingRef.current = true;
             playerRef.current.ensure(outputSampleRateRef.current);
+            playerRef.current.beginTurn(payload.turnId);
+            assistantRmsEmaRef.current = 0;
+            assistantLeakRatioRef.current = 0;
+            assistantWarmupFramesRef.current = 0;
+            assistantStartMsRef.current = Date.now();
             setLastTimings({
               turnId: payload.turnId,
               llmMs: payload.llmMs,
@@ -599,6 +563,10 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             speakingRef.current = false;
             bargeAboveMicRef.current = 0;
             bargeAboveMeetingRef.current = 0;
+            assistantRmsEmaRef.current = 0;
+            assistantLeakRatioRef.current = 0;
+            assistantWarmupFramesRef.current = 0;
+            assistantStartMsRef.current = 0;
             if (payload.reason && payload.reason !== 'completed') {
               playerRef.current.clear();
             }
@@ -610,6 +578,8 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
         const handleBinary = (arrayBuffer: ArrayBuffer) => {
           if (!speakingRef.current) return;
           playerRef.current.ensure(outputSampleRateRef.current);
+          const rms = computeRms(arrayBuffer);
+          assistantRmsEmaRef.current = assistantRmsEmaRef.current * (1 - ASSISTANT_RMS_ALPHA) + rms * ASSISTANT_RMS_ALPHA;
           playerRef.current.enqueuePcm(arrayBuffer);
         };
 
@@ -643,7 +613,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
           view.setFloat64(4, captureTs, true);
           view.setFloat32(12, payload.durationMs, true);
           new Uint8Array(packet, STREAM_HEADER_BYTES).set(new Uint8Array(pcm));
-          socketRef.send(packet);
+          sendOrBufferPacket(packet, payload.durationMs);
         };
 
         if (payload.channelSplit && payload.pcmLeft && payload.pcmRight) {
@@ -652,6 +622,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
 
           const rmsMic = computeRms(payload.pcmLeft);
           noiseEmaMicRef.current = noiseEmaMicRef.current * 0.97 + rmsMic * 0.03;
+          updateMicRms(rmsMic);
           maybeBargeIn('mic', rmsMic);
 
           const rmsMeeting = computeRms(payload.pcmRight);
@@ -665,6 +636,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
 
         const rms = computeRms(payload.pcm);
         noiseEmaMicRef.current = noiseEmaMicRef.current * 0.97 + rms * 0.03;
+        updateMicRms(rms);
         maybeBargeIn('mic', rms);
       };
     } catch (err) {
@@ -673,17 +645,30 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
       setIsRunning(false);
       await stopAll();
     }
-  }, [maybeBargeIn, outputSampleRate, sendJson, stopAll, wsUrl]);
+  }, [
+    flushPreroll,
+    maybeBargeIn,
+    outputSampleRate,
+    resetPreroll,
+    sendJson,
+    sendOrBufferPacket,
+    stopAll,
+    updateMicRms,
+    wsUrl,
+  ]);
 
   return {
     isRunning,
+    isReady,
     state,
     sessionId,
     messages,
     interim,
     lastTimings,
     error,
+    warning,
     outputSampleRate,
+    micRms,
     start,
     stop: stopAll,
     resetHistory,

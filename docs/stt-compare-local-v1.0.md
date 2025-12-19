@@ -208,7 +208,10 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 ## 11. 設定／構成管理
 - 環境変数例:
 ```
-PORT=5173
+# backend (Express/WS) の待受ポート（既定: 4100）。
+SERVER_PORT=4100
+# フロントエンドが backend にアクセスするためのベースURL。
+VITE_API_BASE_URL=http://localhost:4100
 DEEPGRAM_API_KEY=dg_xxx        # 現行デフォルトで必要なのはこれのみ
 ELEVENLABS_API_KEY=xi_xxx      # ElevenLabs を使うにはキーを設定
 WHISPER_WS_URL=ws://localhost:8000/v1/audio/transcriptions
@@ -235,6 +238,9 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": false },
   "storage": { "driver": "jsonl", "path": "./runs/2025-11-19" }, // driver は jsonl または sqlite
   "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
+  "voice": {
+    "vad": { "threshold": 0.45, "silenceDurationMs": 500, "prefixPaddingMs": 300 }
+  },
   "ws": {
     "maxPcmQueueBytes": 5242880,
     "compare": { "backlogSoft": 8, "backlogHard": 32, "maxDropMs": 1000 } // Realtime比較用バックログ制御
@@ -250,6 +256,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 - Batch: wav/mp3/mp4。サーバで PCM S16LE 16k mono に統一（公平比較のベースライン）。
 - チャンク: 250ms（config.audio.chunkMs）。
 - VAD: オプション、公平比較では OFF をデフォルト。
+- Voice会話の server VAD は `config.voice.vad` で閾値/無音長/プレフィックスを調整可能（Realtime比較には影響しない）。
 
 ## 13. 評価設計
 - 正規化（基本）: NFKC → 句読点除去。WER の単語境界を壊さないため、空白は保持（`stripSpace=false`）を基本とする。
@@ -322,9 +329,17 @@ stt-compare-local/
 - セットアップ:
 ```
 pnpm i
+pnpm --filter stt-comparator-client i
 cp .env.example .env
-pnpm tsx src/server.ts
+
+# 開発（UI: http://localhost:5173 / backend: http://localhost:4100）
+pnpm dev
 open http://localhost:5173
+
+# 配信（ビルド済みUIを backend が配信: http://localhost:4100）
+pnpm build
+pnpm start
+open http://localhost:4100
 ```
 - スクリプト: `pnpm start`, `pnpm test`, `pnpm build`。デスクトップラッパーは Tauri/Electron で同梱可。
 

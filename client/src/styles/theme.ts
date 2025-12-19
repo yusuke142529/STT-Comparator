@@ -672,6 +672,38 @@ select:focus, input:focus, textarea:focus {
   box-shadow: var(--shadow-glow);
 }
 
+.voice-input-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.35rem;
+}
+
+.voice-input-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-deep);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.voice-input-bar span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--c-primary) 0%, #22c55e 100%);
+  transition: width 0.12s ease;
+}
+
+.voice-input-label {
+  min-width: 3rem;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .mic-ring {
   width: 2.5rem;
   height: 2.5rem;

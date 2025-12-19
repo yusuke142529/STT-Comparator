@@ -510,7 +510,7 @@ export async function handleStreamConnection(
                 enableInterim: configMsg.enableInterim,
                 contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
                 punctuationPolicy: configMsg.options?.punctuationPolicy,
-                enableVad: configMsg.options?.enableVad,
+                enableVad: configMsg.options?.enableVad ?? false,
                 enableDiarization: configMsg.options?.enableDiarization,
                 dictionaryPhrases: configMsg.options?.dictionaryPhrases,
                 normalizePreset: configMsg.normalizePreset,

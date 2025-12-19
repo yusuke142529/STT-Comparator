@@ -223,7 +223,7 @@ export async function handleReplayConnection(
         enableInterim: configMsg.enableInterim,
         contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
         punctuationPolicy: configMsg.options?.punctuationPolicy,
-        enableVad: configMsg.options?.enableVad,
+        enableVad: configMsg.options?.enableVad ?? false,
         enableDiarization: configMsg.options?.enableDiarization,
         dictionaryPhrases: configMsg.options?.dictionaryPhrases,
         normalizePreset: configMsg.normalizePreset,
@@ -544,14 +544,14 @@ export async function handleReplayMultiConnection(
           language: lang,
           sampleRateHz: providerSampleRate,
           encoding: 'linear16',
-        enableInterim: configMsg.enableInterim,
-        contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
-        punctuationPolicy: configMsg.options?.punctuationPolicy,
-        enableVad: configMsg.options?.enableVad,
-        enableDiarization: configMsg.options?.enableDiarization,
-        dictionaryPhrases: configMsg.options?.dictionaryPhrases,
-        normalizePreset: configMsg.normalizePreset,
-      });
+          enableInterim: configMsg.enableInterim,
+          contextPhrases: configMsg.contextPhrases ?? configMsg.options?.dictionaryPhrases,
+          punctuationPolicy: configMsg.options?.punctuationPolicy,
+          enableVad: configMsg.options?.enableVad ?? false,
+          enableDiarization: configMsg.options?.enableDiarization,
+          dictionaryPhrases: configMsg.options?.dictionaryPhrases,
+          normalizePreset: configMsg.normalizePreset,
+        });
 
         const providerSession: MultiProviderSession = {
           controller: streamingSession.controller,

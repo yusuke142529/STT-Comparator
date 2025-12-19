@@ -321,7 +321,7 @@ describe('handleVoiceConnection', () => {
     expect(state.generateChatReply).toHaveBeenCalledTimes(1);
 
     const json = parseJsonMessages(ws);
-    expect(json.some((m) => m.type === 'voice_user_transcript' && m.isFinal === true && m.source === 'meeting')).toBe(true);
+    expect(json.some((m) => m.type === 'voice_user_transcript' && m.isFinal === true && m.source === 'meeting')).toBe(false);
   });
 
   it('does not match wake words inside other words in meeting mode', async () => {

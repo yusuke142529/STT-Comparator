@@ -328,7 +328,7 @@ export class BatchRunner {
       enableInterim: false,
       contextPhrases: job.options?.dictionaryPhrases,
       punctuationPolicy: job.options?.punctuationPolicy,
-      enableVad: job.options?.enableVad,
+      enableVad: job.options?.enableVad ?? false,
       dictionaryPhrases: job.options?.dictionaryPhrases,
     };
 

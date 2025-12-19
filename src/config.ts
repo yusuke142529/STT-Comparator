@@ -30,10 +30,20 @@ const voicePresetSchema = z.object({
   ttsProvider: z.enum(PROVIDER_IDS),
 });
 
+const voiceVadSchema = z
+  .object({
+    threshold: z.number().min(0).max(1).optional(),
+    silenceDurationMs: z.number().int().min(50).max(5000).optional(),
+    prefixPaddingMs: z.number().int().min(0).max(2000).optional(),
+  })
+  .partial()
+  .default({});
+
 const voiceSchema = z
   .object({
     presets: z.array(voicePresetSchema).min(1).max(20).optional(),
     defaultPresetId: z.string().min(1).max(50).optional(),
+    vad: voiceVadSchema.optional(),
   })
   .partial()
   .default({});
