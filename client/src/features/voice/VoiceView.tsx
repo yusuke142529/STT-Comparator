@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { fetchJson } from '../../utils/fetchJson';
+import { computeVoiceRouting } from '../../utils/audioRouting';
 import { useVoiceSession } from '../../hooks/useVoiceSession';
 import { useAudioInputDevices } from '../../hooks/useAudioInputDevices';
 import { useAudioOutputDevices } from '../../hooks/useAudioOutputDevices';
@@ -168,6 +169,30 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
     : 'Meet 側でマイク入力を仮想デバイス（例: BlackHole）に変更してください';
   const monitorOutputDisabled = !sinkSelectionSupported;
 
+  const routing = useMemo(
+    () =>
+      computeVoiceRouting({
+        monitorAssistant,
+        monitorOutputDeviceId: monitorOutputDeviceId || undefined,
+        enableMeetOutput: enableMeetOutput && !meetOutputDisabled,
+        meetOutputDeviceId: meetOutputDeviceId || undefined,
+        micDeviceId: micDeviceId || undefined,
+        audioOutputs: audioOutputs.devices,
+        audioInputs: audioInputs.devices,
+      }),
+    [
+      audioInputs.devices,
+      audioOutputs.devices,
+      enableMeetOutput,
+      meetOutputDeviceId,
+      meetOutputDisabled,
+      micDeviceId,
+      monitorAssistant,
+      monitorOutputDeviceId,
+    ]
+  );
+  const monitorAutoDisabled = monitorAssistant && !routing.effectiveMonitorAssistant;
+
   const micPermissionLabel = useMemo(() => {
     switch (micPermission) {
       case 'granted':
@@ -268,8 +293,9 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
                     captureTabAudio: effectiveCaptureTabAudio,
                     enableMeetOutput: enableMeetOutput && !meetOutputDisabled,
                     meetOutputDeviceId: meetOutputDeviceId || undefined,
-                    monitorAssistant,
+                    monitorAssistant: routing.effectiveMonitorAssistant,
                     monitorOutputDeviceId: monitorOutputDeviceId || undefined,
+                    allowMicToMeet: routing.allowMicToMeet,
                     meetingRequireWakeWord,
                     wakeWords: parsedWakeWords,
                   },
@@ -333,6 +359,11 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
           </div>
         </div>
       )}
+      {routing.warnings.map((warning) => (
+        <div key={warning} className="banner warning">
+          <div>{warning}</div>
+        </div>
+      ))}
 
       <div className="transcript-body">
         <div className="voice-meeting-settings" style={{ display: 'grid', gap: 10 }}>
@@ -474,7 +505,10 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
                 onChange={(e) => setMonitorAssistant(e.target.checked)}
                 disabled={session.isRunning}
               />
-              <span>アシスタント音声をローカルでも再生（モニタ）</span>
+              <span>
+                アシスタント音声をローカルでも再生（モニタ）
+                {monitorAutoDisabled ? '（出力衝突のため自動OFF）' : ''}
+              </span>
             </label>
             {monitorAssistant && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

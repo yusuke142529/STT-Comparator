@@ -70,6 +70,8 @@ type VoiceMeetingStartOptions = {
   /** Plays assistant audio locally (default: true). */
   monitorAssistant?: boolean;
   monitorOutputDeviceId?: string;
+  /** Allow mixing the local mic into Meet output (default: true). */
+  allowMicToMeet?: boolean;
   meetingRequireWakeWord?: boolean;
   wakeWords?: readonly string[];
   presetMode?: 'pipeline' | 'openai_realtime';
@@ -322,6 +324,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     const monitorOutputDeviceId = meeting?.monitorOutputDeviceId?.trim();
     const enableMeetOutput = meeting?.enableMeetOutput === true;
     const meetOutputDeviceId = meeting?.meetOutputDeviceId?.trim();
+    const allowMicToMeet = meeting?.allowMicToMeet !== false;
     const meetingRequireWakeWord = meeting?.meetingRequireWakeWord ?? true;
     const wakeWords = (meeting?.wakeWords ?? DEFAULT_WAKE_WORDS).map((w) => w.trim()).filter(Boolean);
     const micDeviceId = opts?.micDeviceId?.trim();
@@ -362,7 +365,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
 
       const stream = await requestMicStream(micDeviceId || undefined);
       streamRef.current = stream;
-      playerRef.current.setMicStream(stream, { toMeet: enableMeetOutput });
+      playerRef.current.setMicStream(stream, { toMeet: enableMeetOutput && allowMicToMeet });
       playerRef.current.setMeetMicMuted(false);
 
       if (captureTabAudio && presetMode !== 'pipeline') {
@@ -501,7 +504,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
           if (payload.type === 'voice_state') {
             setState(payload.state);
             speakingRef.current = payload.state === 'speaking';
-            playerRef.current.setMeetMicMuted(enableMeetOutput && payload.state === 'speaking');
+            playerRef.current.setMeetMicMuted(enableMeetOutput && allowMicToMeet && payload.state === 'speaking');
             if (payload.state === 'speaking' && payload.turnId) {
               playerRef.current.beginTurn(payload.turnId);
             }
