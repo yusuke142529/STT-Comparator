@@ -7,6 +7,7 @@ export interface VoiceSessionMessage {
   sessionId: string;
   startedAt: string;
   presetId?: string;
+  mode?: 'pipeline' | 'openai_realtime';
   inputSampleRate: number;
   outputAudioSpec: { sampleRate: number; channels: number; format: string };
   sttProvider: string;

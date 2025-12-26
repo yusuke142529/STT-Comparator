@@ -1,6 +1,7 @@
-import { ChangeEvent, Dispatch, SetStateAction, useMemo, useState } from 'react';
+import { ChangeEvent, Dispatch, SetStateAction, useEffect, useMemo, useState } from 'react';
 import { Icons } from '../../components/icons';
 import { fmt } from '../../utils/metrics';
+import { ToggleSwitch } from '../../components/ToggleSwitch';
 import type { FileResult, JobStatus, PunctuationPolicy, ProviderInfo, SubmitBatchInput } from '../../types/app';
 
 interface BatchViewProps {
@@ -15,6 +16,7 @@ interface BatchViewProps {
   setDictionary: Dispatch<SetStateAction<string>>;
   dictionaryPhrases: string[];
   enableVad: boolean;
+  setEnableVad: (value: boolean) => void;
   punctuationPolicy: PunctuationPolicy;
   setPunctuationPolicy: (value: PunctuationPolicy) => void;
   parallel: number;
@@ -40,6 +42,7 @@ export const BatchView = ({
   setDictionary,
   dictionaryPhrases,
   enableVad,
+  setEnableVad,
   punctuationPolicy,
   setPunctuationPolicy,
   parallel,
@@ -60,12 +63,40 @@ export const BatchView = ({
     () => (secondaryProvider ? providers.find((item) => item.id === secondaryProvider) : undefined),
     [providers, secondaryProvider]
   );
+  const selectedProviders = useMemo(
+    () => (compareMode && secondaryProvider ? [primaryProvider, secondaryProvider] : [primaryProvider]),
+    [compareMode, primaryProvider, secondaryProvider]
+  );
+  const selectedProviderInfos = useMemo(
+    () => selectedProviders.map((id) => providers.find((item) => item.id === id)).filter(Boolean) as ProviderInfo[],
+    [providers, selectedProviders]
+  );
   const selectedProviderAvailable = primary?.available ?? true;
   const selectedProviderBatchReady = selectedProviderAvailable && (primary?.supportsBatch ?? true);
-  const dictionarySupported = primary?.supportsDictionaryPhrases !== false;
   const secondaryProviderReady = compareMode
     ? Boolean(secondary?.available && (secondary?.supportsBatch ?? true) && secondaryProvider !== primaryProvider)
     : true;
+
+  const dictionarySupported = selectedProviderInfos.every((item) => item.supportsDictionaryPhrases !== false);
+  const punctuationSupported = selectedProviderInfos.every((item) => item.supportsPunctuationPolicy !== false);
+  const punctuationOptions = useMemo<PunctuationPolicy[]>(() => {
+    if (selectedProviderInfos.length === 0) {
+      return ['none', 'basic', 'full'];
+    }
+    const perProvider = selectedProviderInfos.map((info) => {
+      if (info.supportsPunctuationPolicy === false) return ['none'] as PunctuationPolicy[];
+      if (info.id === 'deepgram') return ['none', 'full'] as PunctuationPolicy[];
+      return ['none', 'basic', 'full'] as PunctuationPolicy[];
+    });
+    const intersection = perProvider.reduce((acc, opts) => acc.filter((opt) => opts.includes(opt)));
+    return intersection.length > 0 ? intersection : ['none'];
+  }, [selectedProviderInfos]);
+
+  useEffect(() => {
+    if (!punctuationOptions.includes(punctuationPolicy)) {
+      setPunctuationPolicy(punctuationOptions[punctuationOptions.length - 1]);
+    }
+  }, [punctuationOptions, punctuationPolicy, setPunctuationPolicy]);
 
   const progress = useMemo(() => {
     if (!jobStatus || jobStatus.total === 0) return 0;
@@ -89,7 +120,7 @@ export const BatchView = ({
       manifestJson,
       providers: chosenProviders,
       lang,
-      dictionaryPhrases,
+      dictionaryPhrases: dictionarySupported ? dictionaryPhrases : [],
       enableVad,
       punctuationPolicy,
       parallel,
@@ -150,11 +181,24 @@ export const BatchView = ({
         </div>
         <div className="control-group">
           <label>句読点</label>
-          <select value={punctuationPolicy} onChange={(event) => setPunctuationPolicy(event.target.value as PunctuationPolicy)}>
-            { (primaryProvider === 'deepgram' ? ['none', 'full'] : ['none', 'basic', 'full'] as PunctuationPolicy[]).map((opt) => (
+          <select
+            value={punctuationPolicy}
+            onChange={(event) => setPunctuationPolicy(event.target.value as PunctuationPolicy)}
+            disabled={!punctuationSupported}
+          >
+            {punctuationOptions.map((opt) => (
               <option key={opt} value={opt}>{opt}</option>
             ))}
           </select>
+          {!punctuationSupported && (
+            <div className="muted" style={{ fontSize: '0.75rem' }}>
+              比較プロバイダーのいずれかが句読点設定に非対応です。
+            </div>
+          )}
+        </div>
+        <div className="control-group">
+          <label>VAD</label>
+          <ToggleSwitch label="VAD を有効化" checked={enableVad} onChange={setEnableVad} />
         </div>
         <div className="control-group">
           <label>並列数</label>
@@ -205,7 +249,9 @@ export const BatchView = ({
             <div className="muted" style={{ fontSize: '0.75rem' }}>
               {dictionarySupported
                 ? '辞書はRealtimeにも影響します。'
-                : 'このプロバイダは辞書設定を使用しません。'}
+                : compareMode
+                  ? '比較プロバイダーのいずれかが辞書設定に非対応です。'
+                  : 'このプロバイダは辞書設定を使用しません。'}
             </div>
           </div>
       </div>

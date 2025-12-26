@@ -7,7 +7,7 @@
 
 - **Server**: Node.js 20 + Express + WebSocket（`src/` 直下, 既定ポート 4100）
 - **UI**: Vite + React + TypeScript（`client/`、Results タブにプロバイダフィルタと p50/p95 の簡易チャート、Realtime にレイテンシ p50/p95 と履歴テーブル）
-- **Audio**: FFmpeg（`@ffmpeg-installer/ffmpeg`）で webm/opus → PCM (16k mono linear16)。アップロード音源もサーバ側で必ず 16k mono PCM WAV に正規化し、デコードエラーや極端に短い/壊れたファイルは 400 で即時拒否します。
+- **Audio**: FFmpeg（`@ffmpeg-installer/ffmpeg`）で webm/opus → PCM (16k mono linear16)。アップロード音源もサーバ側で必ず 16k mono PCM WAV に正規化し、デコードエラーや極端に短い/壊れたファイルは **preview/replay では 422**（`AUDIO_UNSUPPORTED_FORMAT` など）で拒否、batch はファイル単位で失敗として記録します。必要に応じて strict decode 失敗時に degraded 変換へフォールバックします。
 - **Scoring**: 独自 CER/WER/RTF 実装、正規化プリセット
 - **Storage**: JSONL 永続化（SQLite ドライバも実装済み; storage.driver で切替）
 - **Voice Agent（音声会話）**: STT/TTS（ElevenLabs / OpenAI）+ OpenAI（LLM）。割り込み（barge-in）対応。
@@ -16,17 +16,17 @@
 
 ```
 ├── src/                  # ローカルサーバ（Express/WS）
-│   ├── adapters/         # Provider Adapter 実装（deepgram / local_whisper / whisper_streaming / openai。mock は任意のスタブ）
+│   ├── adapters/         # Provider Adapter 実装（deepgram / elevenlabs / local_whisper / whisper_streaming / openai。mock は任意のスタブ）
 │   ├── jobs/             # バッチ実行・スコアリング
 │   ├── scoring/          # CER/WER/RTF と正規化
 │   ├── storage/          # JSONL/SQLite ドライバ, CSVエクスポータ
 │   ├── utils/            # FFmpeg ブリッジ, マニフェストパーサ
 │   ├── ws/               # Realtime WebSocket handler
 │   └── server.ts         # Express + WS エントリポイント
-├── client/               # Web UI (React)
+├── client/               # Web UI (React), build output: client/dist (served by server)
 │   ├── src/App.tsx       # Realtime + Batch UI ワイヤー
 │   └── vite.config.ts    # 開発/ビルド設定（API Proxy）
-├── public/               # ビルド済み UI の配置先（Express が配信）
+├── public/               # static assets (client/dist が無い場合のフォールバック)
 ├── sample-data/          # manifest 雛形
 ├── config.json           # v1.0 仕様のアプリ設定
 └── .env.example          # API鍵やポートのテンプレート
@@ -45,11 +45,11 @@
   cp .env.example .env
   ```
   - Deepgram を有効化するには `.env` に `DEEPGRAM_API_KEY` を入れてサーバを再起動するだけでOK。既定ポートは 4100（`SERVER_PORT` で変更可能、フロントは `VITE_API_BASE_URL` と Vite proxy がそれに追従します）。
-4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`, `openai`。手元検証用に `mock` を追加することもできます）。`elevenlabs` を使うには `.env` に `ELEVENLABS_API_KEY` を設定してください（バッチ実行のタイムアウトや再試行は以下のオプションでチューニング可能です）。
+4. `config.json` の `storage.path` や `providers` を利用状況に合わせて調整（デフォルトは `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`, `openai`。手元検証用に `mock` を追加することもできます）。`storage.path` は `{date}` プレースホルダを含められ、`YYYY-MM-DD` に展開されます（例: `./runs/{date}`）。展開はサーバ起動時に行われるため、日付跨ぎでフォルダを切り替えたい場合は再起動してください。`elevenlabs` を使うには `.env` に `ELEVENLABS_API_KEY` を設定してください（バッチ実行のタイムアウトや再試行は以下のオプションでチューニング可能です）。
   - `ELEVENLABS_BATCH_TIMEOUT_MS`: 初期リクエストのタイムアウト（既定 60000ms）。
   - `ELEVENLABS_BATCH_MAX_ATTEMPTS`: 一時的な 408/429/5xx への再試行回数（既定 3 回）。
   - `ELEVENLABS_BATCH_BASE_DELAY_MS` / `ELEVENLABS_BATCH_MAX_DELAY_MS`: 再試行間隔の指数バックオフを制御します（既定 1000ms / 5000ms）。
-必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。
+必要に応じて `ALLOWED_ORIGINS` をカンマ区切りで設定し、CORS/CSP/WS の許可先を絞り込めます。保存データの肥大化を防ぐため `storage.retentionDays` と `storage.maxRows` で保持期間と件数上限を設定できます（デフォルト: 30日 / 100,000件）。`ws.keepaliveMs`/`ws.maxMissedPongs` で WS の疎通監視、`ws.meeting` で meetingMode 時のキュー閾値、`ws.replay.minDurationMs` で内部再生の最小再生時間、`providerLimits.batchMaxBytes` でプロバイダ毎のアップロード上限を調整できます。
   - `providerHealth.refreshMs` で `/api/providers` のヘルスチェック結果のキャッシュ期間（ミリ秒）を調整できます。デフォルト 5000ms により、`whisper_streaming` などのローカル ASR サービスを起動した直後でも UI が利用可能に切り替えられ、必要があれば `/api/admin/reload-config` を呼んで即座に再評価させられます。
 
 ### 音声会話（Voice Agent）
@@ -138,25 +138,25 @@ Google Meet（ブラウザ版）のタブ音声を取り込み、さらに **AI�
 - UI 単体（Vite Dev Server, http://localhost:5173）: `pnpm run dev:client`
   - `pnpm run dev:client` now waits for or automatically spawns `pnpm run dev:server` so the React app never sees `ERR_CONNECTION_REFUSED`; the stack script sets `STT_COMPARATOR_BACKEND_MANAGED=1` before launching the client so it does not spawn a duplicate server when you run `pnpm run dev`.
 - フルスタック（サーバ + UI 同時）: `pnpm run dev`
-- ビルド: `pnpm run build`（サーバをコンパイルし、UI を `client/dist` → `public/` へ出力、デフォルトで `COREPACK_HOME=.corepack-cache` を使用）
+- ビルド: `pnpm run build`（サーバをコンパイルし、UI を `client/dist` に出力。Express は `client/dist` があればそれを配信し、無ければ `public/` を配信します。デフォルトで `COREPACK_HOME=.corepack-cache` を使用）
 - 本番起動: `pnpm start`
 
-UI ビルド後は `public/` に生成されたファイルを Express が配信します。開発中は Vite が `/api`・`/ws` へのプロキシを介してサーバと通信します。
+UI ビルド後は `client/dist` のファイルを Express が配信します（`client/dist` が無い場合は `public/` を使用）。開発中は Vite が `/api`・`/ws` へのプロキシを介してサーバと通信します。
 
 ## API・WS 概要
 
 - `POST /api/jobs/transcribe` — multipart/form-data で `files[]`, `provider`, `lang`, `ref_json`, `options` を受け取り、UUID ベースの `jobId` を返却。
 - `GET /api/jobs/:jobId/status` — 進捗（done/failed/total）を返却。
 - `GET /api/jobs/:jobId/results?format=csv|json` — CER/WER/RTF を含むレコードを JSON/CSV で返却。
-- `WS /ws/stream?provider=<id>&lang=<bcp47>` — 接続直後に `StreamingConfigMessage` を送信 → 以降は webm/opus バイナリ（MediaRecorder）を送る。
+- `WS /ws/stream?provider=<id>&lang=<bcp47>` — 接続直後に `StreamingConfigMessage` を送信 → 以降は PCM フレーム（推奨）または webm/opus バイナリ（互換）を送る。
 - UI では punctuation policy（none/basic/full）を選択して送信でき、プロバイダ側の句読点挿入挙動を条件として比較可能。
 - `GET /api/providers` — 現在のプロバイダ有効/無効状態を返却（Deepgram キー未設定などを UI で案内）。この API は現在のプロバイダヘルスを逐次再評価し `providerHealth.refreshMs` ミリ秒ごとにキャッシュを更新するため、ローカルの `whisper_streaming` サーバを起動した後でも数秒以内に UI に「利用可能」と反映されます。
 - `GET /api/realtime/latency?limit=20` — 直近の realtime セッションのレイテンシ集計（avg/p50/p95/min/max, count, provider/lang）を返却。
-- `GET /api/realtime/logs/:sessionId` — `session/transcript/error/session_end` の t と `latencyMs` を含むイベントを時系列で返す。ログは `config.json` の `storage.path` 配下 `runs/<date>/realtime-logs.jsonl` に JSONL 形式で蓄積され、生成AIなどにそのまま送れる診断シーケンスとして使える。
+- `GET /api/realtime/logs/:sessionId` — `session/transcript/normalized/error/session_end` の t と `latencyMs` を含むイベントを時系列で返す。ログは `config.json` の `storage.path` 配下に JSONL 形式で蓄積され（`storage.path` が `{date}` を含む場合は `runs/<date>` に展開）、生成AIなどにそのまま送れる診断シーケンスとして使える。
 
 ### Realtime replay helper
 
-`scripts/realtime-replay.ts` はブラウザの `MediaRecorder` → `/ws/stream` → FFmpeg/Adapter 経路を TypeScript で再現し、音声ファイルを `ffmpeg -re` で WebM/Opus に変換して WS に流し込みます。物理マイクが使えない静音環境でも、provider・言語・マニフェストファイルを切り替えながら latency や transcripts を再現性高く検証できます。`pnpm replay:realtime` から起動でき、`--file sample-data/your.wav` や `--manifest sample-data/manifest.example.json` といった引数で対象を指定します。
+`scripts/realtime-replay.ts` はブラウザの AudioWorklet（PCM フレーム）→ `/ws/stream` → Adapter 経路を TypeScript で再現し、音声ファイルを `ffmpeg -re` で PCM16LE に変換して WS に流し込みます。物理マイクが使えない静音環境でも、provider・言語・マニフェストファイルを切り替えながら latency や transcripts を再現性高く検証できます。`pnpm replay:realtime` から起動でき、`--file sample-data/your.wav` や `--manifest sample-data/manifest.example.json` といった引数で対象を指定します。
 
 - **UI 内部再生**: Realtime タブには「入力ソース」トグルが入り、マイクのほか「内部ファイル再生」を選べます。ファイルを選ぶと UI は `/api/realtime/replay` に音声をアップロードし、返却された `sessionId` を使って `/ws/replay` に接続するため、マイクなしで同じストリーミング経路（FFmpeg → Adapter）を検証できます。CLI ヘルパーと併用して再現性を上げるのが推奨です。
 
@@ -173,20 +173,23 @@ UI ビルド後は `public/` に生成されたファイルを Express が配信
 
 ## スコアリング / ストレージ
 
-- 正規化: `config.json` や manifest の `normalization` フィールドで NFKC/句読点/空白/小文字化を制御（デフォルトは stripSpace=true で CER/WER 比較の基準を揃えています）。
+- 正規化: `config.json` や manifest の `normalization` フィールドで NFKC/句読点/空白/小文字化を制御（デフォルトは stripSpace=false）。
 - CER/WER/RTF: `src/scoring/metrics.ts`。ユニットテスト（`pnpm test`）で動作確認。
-- ストレージ: 既定は JSONL（`runs/<date>/results.jsonl`）。`storage.driver` を `sqlite` にすればスタブが落ちるため、実装追加時に入れ替え。
+- ストレージ: 既定は JSONL（`storage.path` 配下に `results.jsonl`）。`storage.driver` を `sqlite` にすれば `results.sqlite` に書き込みます。
 
 ## Adapter 雛形
 
 - `src/adapters/mock.ts` — ローカル確認/テスト用のスタブ。通常は `config.json` の providers に含まれませんが、必要なら手動追加できます。
 - `src/adapters/deepgram.ts` — Deepgram 公式 API 連携を実装済み。`.env` に `DEEPGRAM_API_KEY` を設定して有効化。
+- `src/adapters/elevenlabs.ts` — ElevenLabs STT（Streaming/Batch）。`.env` に `ELEVENLABS_API_KEY` を設定して有効化。
+- `src/adapters/openai.ts` — OpenAI Realtime/Bulk STT（Streaming/Batch）。`.env` に `OPENAI_API_KEY` を設定して有効化。
+- `src/adapters/localWhisper.ts` — ローカル Whisper（Batch のみ）。Python/Whisper 環境が必要。
 - `src/adapters/whisperStreaming.ts` — ローカル常駐の faster-whisper-server (WS/HTTP) と連携する Streaming/Batch 両対応アダプタ。
 - Adapter を増やす際は `src/adapters/index.ts` に登録し、`config.json` の `providers` に ID を追加します。
 
 ## サンプル manifest
 
-`sample-data/manifest.example.json` は v1.0 仕様の参照 JSON。UI のバッチエリアや `POST /api/jobs/transcribe` の `ref_json` に流用できます。
+`sample-data/manifest.example.json` は v1.0 仕様の参照 JSON。UI のバッチエリアや `POST /api/jobs/transcribe` の `ref_json` に流用できます（音声ファイルは同梱していないため、`items[].audio` に対応するファイルを用意してください）。
 
 ## テスト
 
@@ -207,7 +210,7 @@ pnpm run build
 ## 未実装 / TODO
 
 - （必要なら）AWS/GCP/Azure などクラウド実プロバイダ Adapter 実装
-- Results ダッシュボードのグラフ可視化
+- 結果比較の高度な可視化（複数ジョブ横断）
 - ジョブの永続キューイング（途中再開, 並列制御）
 
 ## ライセンス

@@ -1,4 +1,5 @@
-import type { AppConfig, ProviderId } from '../types.js';
+import type { ProviderId } from '../types.js';
+import type { AppConfig } from '../config.js';
 
 // Conservative defaults sourced from public provider limits; can be overridden via config.providerLimits.batchMaxBytes.
 const DEFAULT_BATCH_MAX_BYTES: Partial<Record<ProviderId, number>> = {

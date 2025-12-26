@@ -25,4 +25,23 @@ describe('JsonlStore pruning', () => {
 
     await rm(dir, { recursive: true, force: true });
   });
+
+  it('uses recordedAt when present for retention', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'jsonl-prune-recorded-'));
+    const store = new JsonlStore<any>(path.join(dir, 'test.jsonl'), {
+      retentionMs: 5_000,
+      pruneIntervalMs: 0,
+    });
+
+    await store.init();
+
+    await store.append({ id: 'old', recordedAt: new Date(Date.now() - 10_000).toISOString() });
+    await store.append({ id: 'new', recordedAt: new Date().toISOString() });
+
+    const rows = await store.readAll();
+    const ids = rows.map((r: any) => r.id);
+    expect(ids).toEqual(['new']);
+
+    await rm(dir, { recursive: true, force: true });
+  });
 });

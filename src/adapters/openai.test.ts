@@ -160,7 +160,7 @@ describe('OpenAIAdapter streaming', () => {
     session.onData((t) => transcripts.push(`${t.isFinal ? 'F' : 'I'}:${t.text}`));
 
     const pcm = new Int16Array([1000, -1000]); // 2 samples
-    await session.controller.sendAudio(Buffer.from(pcm.buffer));
+    await session.controller.sendAudio(pcm.buffer);
 
     ws.emit(
       'message',
@@ -171,7 +171,7 @@ describe('OpenAIAdapter streaming', () => {
       })
     );
 
-    const audioSend = ws.sent.find((m) => typeof m === 'string' && m.includes('input_audio_buffer.append')) as string;
+    const audioSend = ws.sent.find((m: unknown) => typeof m === 'string' && m.includes('input_audio_buffer.append')) as string;
     expect(audioSend).toBeDefined();
     const audioPayload = JSON.parse(audioSend);
     expect(typeof audioPayload.audio).toBe('string');
@@ -238,12 +238,12 @@ describe('OpenAIAdapter streaming', () => {
 
     // Send a tiny chunk (<100ms after upsample) so normal commit would skip
     const tinyPcm = new Int16Array([1, -1, 2, -2]);
-    await session.controller.sendAudio(Buffer.from(tinyPcm.buffer));
+    await session.controller.sendAudio(tinyPcm.buffer);
 
     await session.controller.end();
 
     const hasCommit = ws.sent.some(
-      (m) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit'
+      (m: unknown) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit'
     );
     expect(hasCommit).toBe(true);
   });
@@ -260,13 +260,13 @@ describe('OpenAIAdapter streaming', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     const countCommits = () =>
-      ws.sent.filter((m) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit').length;
+      ws.sent.filter((m: unknown) => typeof m === 'string' && JSON.parse(m).type === 'input_audio_buffer.commit').length;
 
-    await session.controller.sendAudio(Buffer.from(new Int16Array([1, -1]).buffer));
+    await session.controller.sendAudio(new Int16Array([1, -1]).buffer);
     await session.controller.end();
     expect(countCommits()).toBe(1);
 
-    await session.controller.sendAudio(Buffer.from(new Int16Array([2, -2]).buffer));
+    await session.controller.sendAudio(new Int16Array([2, -2]).buffer);
 
     // Simulate a late commit ack for the previous turn arriving after the next audio append.
     ws.emit(
@@ -336,6 +336,35 @@ describe('OpenAIAdapter streaming', () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(finals).toEqual(['first', 'second']);
   });
+
+  it('emits completed transcript even when previous_item_id is missing', async () => {
+    const adapter = new OpenAIAdapter();
+    const session = await adapter.startStreaming({
+      language: 'en',
+      sampleRateHz: 24000,
+      encoding: 'linear16',
+    });
+
+    const ws = wsState.instances.at(-1);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const finals: string[] = [];
+    session.onData((t) => {
+      if (t.isFinal) finals.push(t.text);
+    });
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-1',
+        transcript: 'hello',
+      })
+    );
+
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finals).toEqual(['hello']);
+  });
 });
 
 describe('OpenAIAdapter batch', () => {
@@ -355,18 +384,23 @@ describe('OpenAIAdapter batch', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     });
-    // @ts-expect-error override global fetch for test
-    global.fetch = fetchMock;
+    const globalWithFetch = globalThis as typeof globalThis & { fetch: typeof fetch };
+    const originalFetch = globalWithFetch.fetch;
+    globalWithFetch.fetch = fetchMock as unknown as typeof fetch;
 
-    const adapter = new OpenAIAdapter();
-    const pcm = new Int16Array([1, 2]);
-    await adapter.transcribeFileFromPCM(ReadableFromBuffer(Buffer.from(pcm.buffer)), {
-      language: 'en',
-      sampleRateHz: 16000,
-      encoding: 'linear16',
-    });
+    try {
+      const adapter = new OpenAIAdapter();
+      const pcm = new Int16Array([1, 2]);
+      await adapter.transcribeFileFromPCM(ReadableFromBuffer(Buffer.from(pcm.buffer)), {
+        language: 'en',
+        sampleRateHz: 16000,
+        encoding: 'linear16',
+      });
 
-    expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      globalWithFetch.fetch = originalFetch;
+    }
   });
 
   it('wraps PCM into WAV and parses words', async () => {
@@ -387,19 +421,24 @@ describe('OpenAIAdapter batch', () => {
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     });
-    // @ts-expect-error override global fetch for test
-    global.fetch = fetchMock;
+    const globalWithFetch = globalThis as typeof globalThis & { fetch: typeof fetch };
+    const originalFetch = globalWithFetch.fetch;
+    globalWithFetch.fetch = fetchMock as unknown as typeof fetch;
 
-    const adapter = new OpenAIAdapter();
-    const pcm = new Int16Array([1, 2, 3, 4]);
-    const result = await adapter.transcribeFileFromPCM(
-      ReadableFromBuffer(Buffer.from(pcm.buffer)),
-      { language: 'en', sampleRateHz: 16000, encoding: 'linear16' }
-    );
+    try {
+      const adapter = new OpenAIAdapter();
+      const pcm = new Int16Array([1, 2, 3, 4]);
+      const result = await adapter.transcribeFileFromPCM(
+        ReadableFromBuffer(Buffer.from(pcm.buffer)),
+        { language: 'en', sampleRateHz: 16000, encoding: 'linear16' }
+      );
 
-    expect(fetchMock).toHaveBeenCalled();
-    expect(result.text).toBe('ok');
-    expect(result.words?.[0]?.text).toBe('ok');
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result.text).toBe('ok');
+      expect(result.words?.[0]?.text).toBe('ok');
+    } finally {
+      globalWithFetch.fetch = originalFetch;
+    }
   });
 
   it('normalizes BCP-47 language for batch transcription', async () => {
@@ -411,18 +450,23 @@ describe('OpenAIAdapter batch', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     });
-    // @ts-expect-error override global fetch for test
-    global.fetch = fetchMock;
+    const globalWithFetch = globalThis as typeof globalThis & { fetch: typeof fetch };
+    const originalFetch = globalWithFetch.fetch;
+    globalWithFetch.fetch = fetchMock as unknown as typeof fetch;
 
-    const adapter = new OpenAIAdapter();
-    const pcm = new Int16Array([1, 2]);
-    await adapter.transcribeFileFromPCM(ReadableFromBuffer(Buffer.from(pcm.buffer)), {
-      language: 'ja-JP',
-      sampleRateHz: 16000,
-      encoding: 'linear16',
-    });
+    try {
+      const adapter = new OpenAIAdapter();
+      const pcm = new Int16Array([1, 2]);
+      await adapter.transcribeFileFromPCM(ReadableFromBuffer(Buffer.from(pcm.buffer)), {
+        language: 'ja-JP',
+        sampleRateHz: 16000,
+        encoding: 'linear16',
+      });
 
-    expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      globalWithFetch.fetch = originalFetch;
+    }
   });
 });
 

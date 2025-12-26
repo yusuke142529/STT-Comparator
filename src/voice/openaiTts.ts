@@ -95,11 +95,11 @@ export async function* streamOpenAiTtsPcm(
     const frameBytes = frameSamples * bytesPerSample;
 
     const framePcm = async function* (pcmSource: AsyncIterable<unknown>): AsyncGenerator<Buffer> {
-      let carry = Buffer.alloc(0);
+      let carry: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       for await (const rawChunk of pcmSource) {
         if (signal?.aborted) break;
         const chunk = normalizeChunk(rawChunk);
-        const combined = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+        const combined = (carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk) as Buffer<ArrayBufferLike>;
         const alignedLength = combined.length - (combined.length % bytesPerSample);
         const aligned = combined.subarray(0, alignedLength);
         let offset = 0;
@@ -117,7 +117,7 @@ export async function* streamOpenAiTtsPcm(
       }
     };
 
-    const inputStream = Readable.fromWeb(res.body as unknown as ReadableStream<Uint8Array>);
+    const inputStream = Readable.fromWeb(res.body as any);
 
     if (options.sampleRate === OPENAI_TTS_INPUT_SAMPLE_RATE) {
       try {
@@ -164,12 +164,12 @@ export async function* streamOpenAiTtsPcm(
 
     const pumpPromise = (async () => {
       let seq = 0;
-      let carry = Buffer.alloc(0);
-      try {
-        for await (const raw of inputStream) {
-          if (signal?.aborted) break;
-          const buf = normalizeChunk(raw);
-          const combined = carry.length > 0 ? Buffer.concat([carry, buf]) : buf;
+        let carry: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+        try {
+          for await (const raw of inputStream) {
+            if (signal?.aborted) break;
+            const buf = normalizeChunk(raw);
+            const combined = (carry.length > 0 ? Buffer.concat([carry, buf]) : buf) as Buffer<ArrayBufferLike>;
           const alignedLength = combined.length - (combined.length % bytesPerSample);
           if (alignedLength > 0) {
             const slice = combined.subarray(0, alignedLength);
@@ -213,4 +213,3 @@ export async function* streamOpenAiTtsPcm(
     cleanup();
   }
 }
-

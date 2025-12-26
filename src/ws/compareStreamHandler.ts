@@ -80,16 +80,18 @@ export async function handleCompareStreamConnection(
   let closed = false;
   let expectsPcm = false;
   let sessionDegraded = false;
+  let meetingMode = false;
   let keepaliveTimer: NodeJS.Timeout | null = null;
   let missedPongs = 0;
   let normalizer: StreamNormalizer | null = null;
   let clientSampleRate = config.audio.targetSampleRate;
+  let decodedSampleRate = config.audio.targetSampleRate;
   let closeResolve: (() => void) | null = null;
   const closePromise = new Promise<void>((resolve) => {
     closeResolve = resolve;
   });
   // Expose for tests/diagnostics without affecting runtime behavior.
-  Reflect.set(ws as Record<string, unknown>, '__compareClosePromise', closePromise);
+  Reflect.set(ws as unknown as Record<string, unknown>, '__compareClosePromise', closePromise);
   let messageChain: Promise<void> = Promise.resolve();
 
   const sanitizeCaptureTs = (candidate: number, fallback: number) => {
@@ -260,20 +262,20 @@ export async function handleCompareStreamConnection(
         markProviderFailed(provider, new Error('provider send backlog hard limit exceeded'));
         continue;
       }
-      if (session.pendingCount >= backlogSoft) {
-        session.droppedMs += chunkDurationMs;
+      const durationMs = meta?.durationMs ?? chunkDurationMs;
+      const seq = meta?.seq ?? 0;
+      const captureTs = meta?.captureTs ?? session.lastCaptureTs ?? now;
+      if (meetingMode && session.pendingCount >= backlogSoft) {
+        session.droppedMs += durationMs;
+        sessionDegraded = true;
         if (session.droppedMs > maxDropMs) {
           markProviderFailed(provider, new Error('provider backlog drop budget exceeded'));
         }
         continue;
       }
-      const durationMs = meta?.durationMs ?? chunkDurationMs;
-      const seq = meta?.seq ?? 0;
-      const captureTs = meta?.captureTs ?? session.lastCaptureTs ?? now;
-      const useResampler = expectsPcm && session.perProviderTranscode && session.resampler;
-      const resamplerOutputRate = session.resampler?.outputSampleRate;
-      if (useResampler && resamplerOutputRate && resamplerOutputRate !== clientSampleRate) {
-        await session.resampler.input(chunk, { captureTs, durationMs, seq });
+      const resampler = session.resampler ?? null;
+      if (resampler) {
+        await resampler.input(chunk, { captureTs, durationMs, seq });
       } else {
         deliverChunk(provider, session, chunk, { captureTs, durationMs, seq });
       }
@@ -346,6 +348,7 @@ export async function handleCompareStreamConnection(
           sessionStarted = true;
           expectsPcm = !!configMsg.pcm;
           sessionDegraded = !!configMsg.degraded;
+          meetingMode = configMsg.options?.meetingMode === true;
           if (configMsg.channelSplit === true || configMsg.options?.enableChannelSplit === true) {
             const message = 'channelSplit is not supported in compare mode; disable it or use single-provider streaming';
             recordFatalForAllProviders(message);
@@ -354,8 +357,7 @@ export async function handleCompareStreamConnection(
             ws.close();
             return;
           }
-          const isMeetingMode = configMsg.options?.meetingMode === true;
-          if (isMeetingMode && config.ws?.meeting) {
+          if (meetingMode && config.ws?.meeting) {
             maxQueueBytes = config.ws.meeting.maxPcmQueueBytes ?? maxQueueBytes;
           }
           normalizer = new StreamNormalizer({
@@ -364,6 +366,7 @@ export async function handleCompareStreamConnection(
             sessionId,
           });
           clientSampleRate = configMsg.clientSampleRate ?? config.audio.targetSampleRate;
+          decodedSampleRate = expectsPcm ? clientSampleRate : config.audio.targetSampleRate;
 
           await Promise.all(
             adapters.map(async ({ id, adapter }) => {
@@ -371,6 +374,7 @@ export async function handleCompareStreamConnection(
               const forcedPerProviderTranscode = requiresHighQualityTranscode(id);
               const providerPerProviderTranscode = perProviderTranscode || forcedPerProviderTranscode;
               const effectiveSampleRate = providerPerProviderTranscode ? providerSampleRate : clientSampleRate;
+              const needsResampler = providerPerProviderTranscode && providerSampleRate !== decodedSampleRate;
 
               logger.info({
                 event: 'compare_stream_start',
@@ -410,10 +414,10 @@ export async function handleCompareStreamConnection(
                 captureTsQueue: [],
                 droppedMs: 0,
                 lastAttributed: undefined,
-                inputSampleRate: clientSampleRate,
-                resampler: expectsPcm && providerPerProviderTranscode
+                inputSampleRate: decodedSampleRate,
+                resampler: needsResampler
                   ? createPcmResampler({
-                      inputSampleRate: clientSampleRate,
+                      inputSampleRate: decodedSampleRate,
                       outputSampleRate: providerSampleRate,
                       channels: config.audio.targetChannels,
                     })

@@ -73,7 +73,7 @@ function rawDataToUtf8(raw: RawData): string | null {
 const toTranscriptWords = (value: unknown): TranscriptWord[] | undefined => {
   if (!Array.isArray(value)) return undefined;
   return value
-    .map((item) => {
+    .map((item): TranscriptWord | null => {
       if (!isRecord(item)) return null;
 
       const text =
@@ -111,9 +111,9 @@ const toTranscriptWords = (value: unknown): TranscriptWord[] | undefined => {
         endSec,
         text,
         confidence,
-      } satisfies TranscriptWord;
+      };
     })
-    .filter((x): x is TranscriptWord => Boolean(x));
+    .filter((x): x is TranscriptWord => x !== null);
 };
 
 const toTranscriptWordsFromSegments = (segments: unknown): TranscriptWord[] | undefined => {
@@ -390,6 +390,7 @@ export class OpenAIAdapter extends BaseAdapter {
     const orderPrevByItem = new Map<string, string | null>();
     const orderNextByItem = new Map<string, string>();
     const finalPendingByItem = new Map<string, { text: string | null; speakerId?: string }>();
+    const emittedFinalByItem = new Set<string>();
     let headItemId: string | null = null;
     let lastFinalItemId: string | null = null;
 
@@ -417,15 +418,24 @@ export class OpenAIAdapter extends BaseAdapter {
         const nextId = lastFinalItemId ? orderNextByItem.get(lastFinalItemId) ?? null : headItemId;
         if (!nextId) return;
         const pending = finalPendingByItem.get(nextId);
-        if (!pending) return;
+        if (!pending) {
+          if (emittedFinalByItem.has(nextId)) {
+            lastFinalItemId = nextId;
+            continue;
+          }
+          return;
+        }
         finalPendingByItem.delete(nextId);
         lastFinalItemId = nextId;
-        if (!pending.text) continue;
+        if (emittedFinalByItem.has(nextId)) continue;
+        const text = pending.text;
+        emittedFinalByItem.add(nextId);
+        if (!text) continue;
         listeners.data.forEach((cb) =>
           cb({
             provider: 'openai',
             isFinal: true,
-            text: pending.text,
+            text,
             words: undefined,
             timestamp: Date.now(),
             channel: 'mic',
@@ -648,8 +658,38 @@ export class OpenAIAdapter extends BaseAdapter {
             partialByItem.delete(itemId);
             const speakerId = extractSpeaker(payload) ?? undefined;
             const finalText = extractCompletedText(payload).trim();
-            finalPendingByItem.set(itemId, { text: finalText.length > 0 ? finalText : null, speakerId });
-            emitFinalInOrder();
+            if (emittedFinalByItem.has(itemId)) return;
+
+            const prevId = getPreviousItemId(payload);
+            if (prevId !== undefined) {
+              recordItemOrder(itemId, prevId);
+              finalPendingByItem.set(itemId, { text: finalText.length > 0 ? finalText : null, speakerId });
+              emitFinalInOrder();
+              return;
+            }
+
+            if (orderPrevByItem.has(itemId)) {
+              finalPendingByItem.set(itemId, { text: finalText.length > 0 ? finalText : null, speakerId });
+              emitFinalInOrder();
+              return;
+            }
+
+            // No ordering info available; emit immediately to avoid dropping finals.
+            recordItemOrder(itemId, null);
+            lastFinalItemId = itemId;
+            emittedFinalByItem.add(itemId);
+            if (!finalText) return;
+            listeners.data.forEach((cb) =>
+              cb({
+                provider: 'openai',
+                isFinal: true,
+                text: finalText,
+                words: undefined,
+                timestamp: Date.now(),
+                channel: 'mic',
+                speakerId,
+              })
+            );
             return;
           }
 
@@ -884,7 +924,7 @@ export class OpenAIAdapter extends BaseAdapter {
 
       const buildForm = (useModel: string) => {
         const form = new FormData();
-        form.append('file', new Blob([wav], { type: 'audio/wav' }), 'audio.wav');
+        form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'audio.wav');
         form.append('model', useModel);
         if (language) form.append('language', language);
         if (opts.dictionaryPhrases?.length) form.append('prompt', opts.dictionaryPhrases.join(', '));

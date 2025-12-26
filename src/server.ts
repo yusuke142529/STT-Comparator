@@ -38,8 +38,8 @@ import type {
   StorageDriver,
   TranscriptionOptions,
   EvaluationManifest,
-  AppConfig,
 } from './types.js';
+import type { AppConfig } from './config.js';
 import type { ProviderAvailability } from './utils/providerStatus.js';
 import { ReplaySessionStore } from './replay/replaySessionStore.js';
 import type { RealtimeTranscriptLogStore } from './storage/realtimeTranscriptStore.js';
@@ -664,12 +664,14 @@ async function bootstrap() {
           realtimeTranscriptLogStore
         );
       } catch (error) {
-        logger.error({ event: 'ws_handler_error', message: error.message });
-        sendWsError(error.message ?? 'streaming handler error');
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.error({ event: 'ws_handler_error', message: err.message });
+        sendWsError(err.message ?? 'streaming handler error');
       }
     })().catch((error) => {
-      logger.error({ event: 'ws_handler_error', message: error.message });
-      sendWsError(error.message ?? 'streaming connection error');
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error({ event: 'ws_handler_error', message: err.message });
+      sendWsError(err.message ?? 'streaming connection error');
     });
   });
 

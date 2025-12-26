@@ -37,6 +37,7 @@ export default function App() {
   const [dictionary, setDictionary] = useState('');
   const [enableInterim, setEnableInterim] = useState(true);
   const [enableVad, setEnableVad] = useState(false);
+  const [batchEnableVad, setBatchEnableVad] = useState(false);
   const [enableDiarization, setEnableDiarization] = useState(false);
   const [enableChannelSplit, setEnableChannelSplit] = useState(false);
   const [meetingMode, setMeetingMode] = useState(false);
@@ -270,7 +271,8 @@ export default function App() {
           dictionary={dictionary}
           setDictionary={setDictionary}
           dictionaryPhrases={dictionaryPhrases}
-          enableVad={enableVad}
+          enableVad={batchEnableVad}
+          setEnableVad={setBatchEnableVad}
           punctuationPolicy={punctuationPolicy}
           setPunctuationPolicy={setPunctuationPolicy}
           parallel={parallel}

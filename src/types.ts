@@ -163,6 +163,7 @@ export interface NormalizedTranscriptMessage {
   revision: number;
   latencyMs?: number;
   originCaptureTs?: number;
+  speakerId?: string;
   confidence?: number | null;
   punctuationApplied?: boolean | null;
   casingApplied?: boolean | null;
@@ -375,61 +376,6 @@ export interface BatchJobFileResult {
 }
 
 export type StorageDriverName = 'jsonl' | 'sqlite';
-
-export interface AppConfig {
-  audio: {
-    targetSampleRate: number;
-    targetChannels: number;
-    chunkMs: number;
-  };
-  ingressNormalize?: {
-    enabled?: boolean;
-    targetSampleRate?: number;
-    targetChannels?: number;
-    peakDbfs?: number;
-    maxDurationSec?: number;
-  };
-  normalization: NormalizationConfig;
-  storage: {
-    driver: StorageDriverName;
-    path: string;
-    retentionDays?: number;
-    maxRows?: number;
-  };
-  providers: ProviderId[];
-  jobs?: {
-    maxParallel?: number;
-    retentionMs?: number;
-  };
-  ws?: {
-    maxPcmQueueBytes?: number;
-    compare?: {
-      backlogSoft?: number;
-      backlogHard?: number;
-      maxDropMs?: number;
-    };
-  };
-  providerHealth?: {
-    refreshMs?: number;
-  };
-  providerLimits?: {
-    batchMaxBytes?: Partial<Record<ProviderId, number>>;
-  };
-  voice?: {
-    /** Voice Agent presets shown in the UI (for per-session selection). */
-    presets?: Array<{
-      id: string;
-      label?: string;
-      mode?: VoiceAgentMode;
-      sttProvider: ProviderId;
-      ttsProvider: ProviderId;
-    }>;
-    /** Voice-only VAD tuning (does not affect realtime comparison). */
-    vad?: VadConfig;
-    /** Default preset id used when the client does not specify one. */
-    defaultPresetId?: string;
-  };
-}
 
 export interface SummaryStats {
   /** Number of valid samples included in this metric (finite values only). */

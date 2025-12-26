@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { PROVIDER_IDS } from './types.js';
-import type { AppConfig, ProviderId } from './types.js';
+import type { ProviderId } from './types.js';
 
 const normalizationSchema = z.object({
   nfkc: z.boolean().optional(),
@@ -48,7 +48,7 @@ const voiceSchema = z
   .partial()
   .default({});
 
-const configSchema = z.object({
+export const configSchema = z.object({
   audio: z.object({
     targetSampleRate: z.number().default(16000),
     targetChannels: z.number().default(1),
@@ -74,12 +74,19 @@ const configSchema = z.object({
   ws: z
     .object({
       maxPcmQueueBytes: z.number().min(128 * 1024).max(100 * 1024 * 1024).default(5 * 1024 * 1024),
+      overflowGraceMs: z.number().int().min(100).max(30_000).default(500),
       keepaliveMs: z.number().int().min(5_000).max(120_000).default(30_000),
       maxMissedPongs: z.number().int().min(1).max(10).default(2),
       meeting: z
         .object({
           maxPcmQueueBytes: z.number().int().min(128 * 1024).max(100 * 1024 * 1024).optional(),
           overflowGraceMs: z.number().int().min(100).max(10_000).optional(),
+        })
+        .partial()
+        .default({}),
+      replay: z
+        .object({
+          minDurationMs: z.number().int().min(0).max(10_000).optional(),
         })
         .partial()
         .default({}),
@@ -107,7 +114,22 @@ const configSchema = z.object({
     .default({}),
 });
 
+export type AppConfig = z.infer<typeof configSchema>;
+
 let cachedConfig: AppConfig | null = null;
+
+function formatLocalDate(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function expandStoragePath(input: string): string {
+  if (!input.includes('{date}')) return input;
+  return input.replaceAll('{date}', formatLocalDate());
+}
 
 export async function loadConfig(configPath = path.resolve('config.json')): Promise<AppConfig> {
   if (cachedConfig) {
@@ -118,6 +140,10 @@ export async function loadConfig(configPath = path.resolve('config.json')): Prom
   const parsed = configSchema.parse(JSON.parse(raw));
   const typed: AppConfig = {
     ...parsed,
+    storage: {
+      ...parsed.storage,
+      path: expandStoragePath(parsed.storage.path),
+    },
     providers: parsed.providers as ProviderId[],
   };
   cachedConfig = typed;

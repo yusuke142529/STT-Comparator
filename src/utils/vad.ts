@@ -13,8 +13,8 @@ const DEFAULT_VAD: ResolvedVadConfig = {
 };
 
 const clampNumber = (value: number | undefined, min: number, max: number, fallback: number): number => {
-  if (!Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, value));
+  const safe = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, safe));
 };
 
 export function resolveVadConfig(vad?: VadConfig): ResolvedVadConfig {

@@ -44,9 +44,9 @@ const state = vi.hoisted(() => {
     let startOpts: any;
     return {
       controller: {
-        sendAudio: vi.fn(async (_chunk?: ArrayBufferLike, _meta?: { captureTs?: number }) => {}),
-        end: vi.fn(async () => {}),
-        close: vi.fn(async () => {}),
+        sendAudio: vi.fn(async () => {}) as ReturnType<typeof vi.fn>,
+        end: vi.fn(async () => {}) as ReturnType<typeof vi.fn>,
+        close: vi.fn(async () => {}) as ReturnType<typeof vi.fn>,
       },
       get startOpts() {
         return startOpts;
@@ -177,7 +177,14 @@ describe('handleCompareStreamConnection', () => {
 
     ws.emit(
       'message',
-      Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000 })),
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          options: { meetingMode: true },
+        })
+      ),
       false
     );
     await flushMicrotasks();
@@ -229,7 +236,10 @@ describe('handleCompareStreamConnection', () => {
 
   it('logs session and session_end per provider', async () => {
     const logStore: RealtimeTranscriptLogWriter = {
+      init: vi.fn(async () => {}),
       append: vi.fn(async () => {}),
+      readSession: vi.fn(async () => []),
+      listSessions: vi.fn(async () => []),
     };
     const { handleCompareStreamConnection } = await import('./compareStreamHandler.js');
     const ws = new FakeWebSocket();
@@ -322,7 +332,10 @@ describe('handleCompareStreamConnection', () => {
 
   it('rejects channelSplit config in compare mode and logs error per provider', async () => {
     const logStore: RealtimeTranscriptLogWriter = {
+      init: vi.fn(async () => {}),
       append: vi.fn(async () => {}),
+      readSession: vi.fn(async () => []),
+      listSessions: vi.fn(async () => []),
     };
     const { handleCompareStreamConnection } = await import('./compareStreamHandler.js');
     const ws = new FakeWebSocket();
@@ -431,7 +444,7 @@ describe('handleCompareStreamConnection', () => {
     const closeListener = ws.rawListeners('close')[0] as (() => void) | undefined;
     ws.emit('close');
     closeListener?.call(ws);
-    const closePromise = (ws as Record<string, unknown>).__compareClosePromise as Promise<void> | undefined;
+    const closePromise = (ws as unknown as Record<string, unknown>).__compareClosePromise as Promise<void> | undefined;
     if (closePromise) {
       await closePromise;
     }
@@ -456,5 +469,20 @@ describe('handleCompareStreamConnection', () => {
 
     expect(state.providers.openai.startOpts?.sampleRateHz).toBe(24_000);
     expect(state.providers.deepgram.startOpts?.sampleRateHz).toBe(16_000);
+  });
+
+  it('resamples non-PCM input for OpenAI when sample rates differ', async () => {
+    const { handleCompareStreamConnection } = await import('./compareStreamHandler.js');
+    const { createPcmResampler } = await import('../utils/ffmpeg.js');
+    const ws = new FakeWebSocket();
+
+    await handleCompareStreamConnection(ws as any, ['openai', 'deepgram'], 'ja-JP', noopStore);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'config' })), false);
+    await flushMicrotasks();
+
+    expect(createPcmResampler).toHaveBeenCalledWith(
+      expect.objectContaining({ inputSampleRate: 16_000, outputSampleRate: 24_000 })
+    );
   });
 });

@@ -44,7 +44,7 @@ describe('streamTtsPcm', () => {
     process.env.ELEVENLABS_API_KEY = 'test-key';
     process.env.ELEVENLABS_TTS_VOICE_ID = 'voice-123';
 
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => {
       const body = new ReadableStream({
         start(controller) {
           controller.enqueue(new Uint8Array([1, 2, 3]));
@@ -60,7 +60,8 @@ describe('streamTtsPcm', () => {
     expect(first.done).toBe(false);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0] ?? '')).toContain('/v1/text-to-speech/voice-123/stream');
+    const call = fetchMock.mock.calls[0];
+    expect(String(call?.[0] ?? '')).toContain('/v1/text-to-speech/voice-123/stream');
 
     await gen.return?.(undefined);
   });
@@ -74,7 +75,7 @@ describe('streamTtsPcm', () => {
     const { streamTtsPcm } = await import('./elevenlabsTts.js');
     const { spawnPcmTranscoder } = await import('../utils/ffmpeg.js');
 
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => {
       const body = new ReadableStream({
         start(controller) {
           controller.enqueue(new Uint8Array([1, 2, 3]));

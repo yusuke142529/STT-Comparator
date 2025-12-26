@@ -534,7 +534,7 @@ describe('handleVoiceConnection', () => {
     }
 
     // Resolve the first (aborted) LLM call after the second turn has already started.
-    rejectFirst?.(new Error('AbortError'));
+    (rejectFirst as ((err: Error) => void) | null)?.(new Error('AbortError'));
     await flushMicrotasks();
 
     // Stop the second assistant speech; this must still work even if the first turn completes late.

@@ -1,8 +1,8 @@
 # Repository Guidelines
 
 ## Project Structure & Docs
-- `src/`: Node/Express/WS server — `adapters/` (providers), `jobs/` (batch runner), `scoring/` (metrics), `storage/` (JSONL/SQLite stubs, CSV export), `ws/` (stream handler), `utils/` (FFmpeg/manifest helpers), entrypoint `server.ts`.
-- `client/`: React + Vite UI (`src/App.tsx`, `styles.css`, `main.tsx`); `vite.config.ts` proxies `/api` and `/ws`（サーバ既定ポート 4100 は `.env` の `VITE_API_BASE_URL` と同期）。Results タブはプロバイダフィルタ/ファイル名検索と p50/p95 簡易チャート、Realtime はレイテンシ p50/p95 を即時計測表示し、履歴テーブルで過去セッションを確認できる。
+- `src/`: Node/Express/WS server — `adapters/` (providers), `jobs/` (batch runner), `scoring/` (metrics), `storage/` (JSONL/SQLite drivers, CSV export), `replay/` (preview/replay stores), `voice/` (voice agent), `ws/` (stream/replay/voice handlers), `utils/` (FFmpeg/manifest helpers), entrypoint `server.ts`.
+- `client/`: React + Vite UI (`src/App.tsx`, `styles/theme.ts`, `main.tsx`); `vite.config.ts` proxies `/api` and `/ws`（サーバ既定ポート 4100 は `.env` の `VITE_API_BASE_URL` と同期）。Results タブはプロバイダフィルタ/ファイル名検索と p50/p95 簡易チャート、Realtime はレイテンシ p50/p95 を即時計測表示し履歴テーブルで過去セッションを確認、Voice タブは音声会話（STT/LLM/TTS）を提供する。
 - `public/`: static assets; after build, `client/dist` is served. Samples: `sample-data/`.
 - Full仕様: `docs/stt-compare-local-v1.0.md` を参照（要件・型・API）。
 
@@ -13,7 +13,7 @@
 ## Environment & Config
 - Node 20+, pnpm 10+, FFmpeg in PATH (or `@ffmpeg-installer/ffmpeg`). Chrome/Edge を主対象（Safari は v1.0 未対応）。
 - Copy `.env.example` → `.env`; set provider keys, `SERVER_PORT`/`PORT` (default 4100).
-- `config.json`: audio 16k/mono/250ms、normalizationプリセット、storage driver/path、providers。現行バンドルは `deepgram`, `local_whisper`, `whisper_streaming`（`mock` は必要に応じて追加）。追加実装は拡張時に `src/adapters/index.ts` へ登録。storage.driver は `jsonl` または `sqlite`（better-sqlite3実装済）。
+- `config.json`: audio 16k/mono/250ms、normalizationプリセット、storage driver/path、providers。現行バンドルは `deepgram`, `elevenlabs`, `openai`, `local_whisper`, `whisper_streaming`（`mock` は必要に応じて追加）。追加実装は拡張時に `src/adapters/index.ts` へ登録。storage.driver は `jsonl` または `sqlite`（better-sqlite3実装済）。
 
 ## Build, Test, and Development
 - Install: `pnpm install` (root) + `pnpm --filter stt-comparator-client install`.
@@ -44,11 +44,11 @@
 - 出力: JSON camelCase / CSV snake_case。CSV/JSON エクスポート必須。
 
 ## Adapters & Runtime Notes
-- 実装済: Mock, Deepgram（Streaming/Batch）。`.env` に `DEEPGRAM_API_KEY` が無い場合は `/api/providers` で unavailable と返し、UI からは選択不可&警告表示。AWS/GCP/Azure など他クラウドはローカル用途のため未実装・任意拡張。
+- 実装済: Mock, Deepgram, ElevenLabs, OpenAI, local_whisper（Batchのみ）, whisper_streaming（Streaming/Batch）。`.env` に各 API キーが無い場合は `/api/providers` で unavailable と返し、UI からは選択不可&警告表示。AWS/GCP/Azure など他クラウドはローカル用途のため未実装・任意拡張。
 - Streaming: `src/ws/streamHandler.ts` で最初のPCM送信時刻を基準に `latencyMs` を付与し UI に表示。
 - Batch: `src/jobs/batchRunner.ts` で `options.parallel` による並列処理、正規化は manifest が無い場合 config の既定を使用。
 - Storage: JSONL (`results.jsonl`) か SQLite (`results.sqlite`, better-sqlite3)。両方 `storage.path` 配下に生成。
 
 ## Security & Data Hygiene
-- `.env` や実音声をコミットしない。ストレージ出力は `runs/<date>/`（driver: jsonl/sqlite）。大容量ログは適宜削除。
+- `.env` や実音声をコミットしない。ストレージ出力は `runs/<date>/`（driver: jsonl/sqlite。`storage.path` の `{date}` を `YYYY-MM-DD` に展開）。大容量ログは適宜削除。
 - 送信先は許可されたプロバイダエンドポイントのみ。入力は zod/manifest パーサで検証し、CORS/helmet のデフォルトを維持。ローカル利用でも鍵漏えいとパストラバーサルは防ぐ。

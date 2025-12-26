@@ -315,7 +315,7 @@ describe('BatchRunner', () => {
 
     const store = memoryStore();
     const { runner } = await setupRunner(store);
-    const { jobId } = await runner.enqueue(['p1', 'p2'], 'ja-JP', [
+    const { jobId } = await runner.enqueue(['mock', 'deepgram'], 'ja-JP', [
       { path: filePath, originalname: 'c.wav', size: 1 },
     ]);
 
@@ -323,7 +323,7 @@ describe('BatchRunner', () => {
     expect(status?.total).toBe(2);
     expect(status?.done).toBe(2);
     expect(store.records).toHaveLength(2);
-    expect(new Set(store.records.map((r) => r.provider))).toEqual(new Set(['p1', 'p2']));
+    expect(new Set(store.records.map((r) => r.provider))).toEqual(new Set(['mock', 'deepgram']));
     expect(transcribe).toHaveBeenCalledTimes(2);
   });
 

@@ -74,15 +74,24 @@ const useRealtimeController = (props: RealtimeViewProps) => {
     refreshLogSessions,
   } = props;
 
+  const activeProviders = useMemo(
+    () => [primaryProvider, ...(secondaryProvider && secondaryProvider !== primaryProvider ? [secondaryProvider] : [])],
+    [primaryProvider, secondaryProvider]
+  );
+
   const selectedProviderInfo = useMemo(
     () => providers.find((item) => item.id === primaryProvider),
     [providers, primaryProvider]
   );
 
-  const supportsDictionary = selectedProviderInfo?.supportsDictionaryPhrases !== false;
-  const supportsContext = selectedProviderInfo?.supportsContextPhrases !== false;
-  const supportsPunctuation = selectedProviderInfo?.supportsPunctuationPolicy !== false;
-  const supportsDiarization = selectedProviderInfo?.supportsDiarization !== false;
+  const selectedProviderInfos = useMemo(
+    () => activeProviders.map((id) => providers.find((item) => item.id === id)).filter(Boolean) as ProviderInfo[],
+    [activeProviders, providers]
+  );
+
+  const supportsDictionary = selectedProviderInfos.every((item) => item.supportsDictionaryPhrases !== false);
+  const supportsContext = selectedProviderInfos.every((item) => item.supportsContextPhrases !== false);
+  const supportsDiarization = selectedProviderInfos.every((item) => item.supportsDiarization !== false);
 
   const [inputSource, setInputSource] = useState<'mic' | 'file'>('mic');
   const [replayFile, setReplayFile] = useState<File | null>(null);
@@ -258,14 +267,19 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   }, [releaseReplayAudioUrl]);
 
   const punctuationOptions = useMemo<PunctuationPolicy[]>(() => {
-    if (!supportsPunctuation) {
-      return ['none'];
+    if (selectedProviderInfos.length === 0) {
+      return ['none', 'basic', 'full'];
     }
-    if (selectedProviderInfo?.id === 'deepgram') {
-      return ['none', 'full'];
-    }
-    return ['none', 'basic', 'full'];
-  }, [selectedProviderInfo?.id, supportsPunctuation]);
+    const perProvider = selectedProviderInfos.map((info) => {
+      if (info.supportsPunctuationPolicy === false) return ['none'] as PunctuationPolicy[];
+      if (info.id === 'deepgram') return ['none', 'full'] as PunctuationPolicy[];
+      return ['none', 'basic', 'full'] as PunctuationPolicy[];
+    });
+    const intersection = perProvider.reduce((acc, opts) => acc.filter((opt) => opts.includes(opt)));
+    return intersection.length > 0 ? intersection : ['none'];
+  }, [selectedProviderInfos]);
+
+  const supportsPunctuation = punctuationOptions.some((opt) => opt !== 'none');
 
   useEffect(() => {
     if (!supportsPunctuation) {
@@ -415,11 +429,6 @@ const useRealtimeController = (props: RealtimeViewProps) => {
   const secondaryTranscripts = useMemo(
     () => (secondaryProvider ? streamSession.transcripts.filter((row) => row.provider === secondaryProvider) : []),
     [streamSession.transcripts, secondaryProvider]
-  );
-
-  const activeProviders = useMemo(
-    () => [primaryProvider, ...(secondaryProvider && secondaryProvider !== primaryProvider ? [secondaryProvider] : [])],
-    [primaryProvider, secondaryProvider]
   );
 
   const alignedWindows = useMemo(() => {

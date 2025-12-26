@@ -5,7 +5,7 @@ import { LocalWhisperAdapter } from './localWhisper.js';
 describe('LocalWhisperAdapter', () => {
   it('throws for streaming (not supported)', async () => {
     const adapter = new LocalWhisperAdapter();
-    await expect(adapter.startStreaming({} as any)).rejects.toThrow(/does not support streaming/i);
+    await expect(adapter.startStreaming()).rejects.toThrow(/does not support streaming/i);
   });
 
   it('uses runWhisper result for batch PCM', async () => {

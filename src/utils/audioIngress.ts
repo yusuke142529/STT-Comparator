@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { normalizeToPcmWav, AudioDecodeError } from './audioNormalizer.js';
-import type { AppConfig } from '../types.js';
+import type { AppConfig } from '../config.js';
 
 const PCM_FORMAT_TAG = 1;
 const WAV_PROBE_BYTES = 4096;
@@ -209,12 +209,12 @@ export async function ensureNormalizedAudio(
 
   const info = await parseWavHeader(inputPath);
 
-  let durationSec = info?.durationSec;
-  if (!durationSec) {
+  let durationSec: number | null = info?.durationSec ?? null;
+  if (durationSec === null) {
     durationSec = await probeDurationSec(inputPath);
   }
 
-  if (enabled && config.ingressNormalize?.maxDurationSec && durationSec) {
+  if (enabled && config.ingressNormalize?.maxDurationSec && typeof durationSec === 'number') {
     if (durationSec > config.ingressNormalize.maxDurationSec) {
       throw new AudioValidationError(
         'AUDIO_TOO_LONG',
@@ -230,7 +230,7 @@ export async function ensureNormalizedAudio(
     : !isPcmWav(info);
 
   let resultPath = inputPath;
-  let effectiveDurationSec = durationSec ?? 0;
+  let effectiveDurationSec = typeof durationSec === 'number' ? durationSec : 0;
   let degraded = false;
   let generated = false;
   let outputStats = stats;

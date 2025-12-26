@@ -14,10 +14,12 @@ export interface NormalizedTranscriptEvent {
   revision: number;
   latencyMs?: number;
   originCaptureTs?: number;
+  speakerId?: string;
   confidence?: number | null;
   punctuationApplied?: boolean | null;
   casingApplied?: boolean | null;
   words?: PartialTranscript['words'];
+  textDelta?: string;
 }
 
 type WindowState = {
@@ -82,10 +84,12 @@ export class StreamNormalizer {
         revision: previous.revision,
         latencyMs: transcript.latencyMs ?? undefined,
         originCaptureTs: transcript.originCaptureTs ?? captureTs,
+        speakerId: transcript.speakerId,
         confidence: previous.confidence ?? null,
         punctuationApplied: previous.punctuationApplied ?? null,
         casingApplied: previous.casingApplied ?? null,
         words: previous.words,
+        textDelta: previous.textDelta,
       };
     }
 
@@ -124,6 +128,7 @@ export class StreamNormalizer {
       revision,
       latencyMs: transcript.latencyMs,
       originCaptureTs: transcript.originCaptureTs,
+      speakerId: transcript.speakerId,
       confidence: nextState.confidence ?? null,
       punctuationApplied: nextState.punctuationApplied ?? null,
       casingApplied: nextState.casingApplied ?? null,

@@ -247,10 +247,11 @@ export class WhisperStreamingAdapter extends BaseAdapter {
     pcm.on('close', clearIdle);
 
     const contentType = `audio/l16; rate=${opts.sampleRateHz}; channels=1`;
+    const readable = pcm instanceof Readable ? pcm : (pcm as unknown as Readable);
     const requestInit: FetchDuplexInit = {
       method: 'POST',
       headers: { 'Content-Type': contentType },
-      body: Readable.toWeb(pcm) as unknown as BodyInit,
+      body: Readable.toWeb(readable) as unknown as BodyInit,
       signal: controller.signal,
     };
     requestInit.duplex = 'half';
@@ -300,11 +301,19 @@ export class WhisperStreamingAdapter extends BaseAdapter {
         ? Math.round(vendorProcessingMsRaw)
         : undefined;
 
+    const text =
+      typeof payloadRecord.text === 'string'
+        ? payloadRecord.text
+        : typeof payloadRecord.transcription === 'string'
+          ? payloadRecord.transcription
+          : typeof payloadRecord.partial === 'string'
+            ? payloadRecord.partial
+            : '';
     return {
       provider: this.id,
-      text: typeof payload.text === 'string' ? payload.text : typeof payload.transcription === 'string' ? payload.transcription : '',
+      text,
       words,
-      durationSec: durationSec,
+      durationSec,
       vendorProcessingMs,
     };
   }

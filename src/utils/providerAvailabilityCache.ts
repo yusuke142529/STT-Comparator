@@ -1,4 +1,4 @@
-import type { AppConfig } from '../types.js';
+import type { AppConfig } from '../config.js';
 import type { ProviderAvailability } from './providerStatus.js';
 import { computeProviderAvailability } from './providerStatus.js';
 

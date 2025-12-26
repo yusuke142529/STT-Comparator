@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { Readable, Transform } from 'node:stream';
 import { loadConfig } from '../config.js';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import type { AppConfig } from '../types.js';
+import type { AppConfig } from '../config.js';
 
 export async function assertFfmpegAvailable(): Promise<void> {
   const ffmpegPath = ffmpegInstaller.path;

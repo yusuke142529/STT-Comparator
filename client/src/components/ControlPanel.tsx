@@ -164,9 +164,17 @@ export const ControlPanel = memo(({
 
   const selectedProviderInfo = useMemo(() => providers.find((item) => item.id === primaryProvider), [providers, primaryProvider]);
   const selectedSecondaryInfo = useMemo(() => providers.find((item) => item.id === secondaryProvider), [providers, secondaryProvider]);
+  const activeProviders = useMemo(
+    () => [primaryProvider, ...(secondaryProvider ? [secondaryProvider] : [])],
+    [primaryProvider, secondaryProvider]
+  );
+  const activeProviderInfos = useMemo(
+    () => activeProviders.map((id) => providers.find((item) => item.id === id)).filter(Boolean) as ProviderInfo[],
+    [activeProviders, providers]
+  );
 
-  const dictionaryDisabled = selectedProviderInfo?.supportsDictionaryPhrases === false;
-  const punctuationDisabled = selectedProviderInfo?.supportsPunctuationPolicy === false;
+  const dictionaryDisabled = activeProviderInfos.some((item) => item.supportsDictionaryPhrases === false);
+  const punctuationDisabled = punctuationOptions.length === 1 && punctuationOptions[0] === 'none';
 
   const realtimeNote = !selectedProviderAvailable
     ? 'このプロバイダは現在利用できません。'
@@ -450,7 +458,9 @@ export const ControlPanel = memo(({
             />
             <p className="helper-text">
               {dictionaryDisabled
-                ? 'このプロバイダでは辞書やコンテキストフレーズが利用されません。'
+                ? secondaryProvider
+                  ? '比較プロバイダーのいずれかが辞書/コンテキストに非対応です。'
+                  : 'このプロバイダでは辞書やコンテキストフレーズが利用されません。'
                 : '辞書はRealtimeとBatchの両方で共有されます。'}
             </p>
           </div>

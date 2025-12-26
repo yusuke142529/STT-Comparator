@@ -232,11 +232,8 @@ export async function handleReplayConnection(
       controller = streamingSession.controller;
 
       streamingSession.onData((transcript) => {
-        const { originCaptureTs, next } = takeAttribution(
-          captureTsQueue,
-          lastAttributed,
-          lastAudioSentAt ?? firstAudioSentAt
-        );
+        const fallbackTs = lastAudioSentAt ?? firstAudioSentAt ?? undefined;
+        const { originCaptureTs, next } = takeAttribution(captureTsQueue, lastAttributed, fallbackTs);
         lastAttributed = next;
 
         const latencyMs = Date.now() - originCaptureTs;
@@ -631,7 +628,7 @@ export async function handleReplayMultiConnection(
     } catch (error) {
       logger.error({
         event: 'replay_attach_error',
-        provider,
+        providers: Array.from(sessions.keys()),
         message: error instanceof Error ? error.message : String(error),
       });
       handleFatal(error as Error);

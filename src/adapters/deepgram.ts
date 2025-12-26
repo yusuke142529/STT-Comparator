@@ -72,7 +72,7 @@ const SUPPORTED_DEEPGRAM_LANGUAGES = [
   'uk',
   'vi',
 ] as const;
-const SUPPORTED_DEEPGRAM_LANGUAGE_SET = new Set(SUPPORTED_DEEPGRAM_LANGUAGES);
+const SUPPORTED_DEEPGRAM_LANGUAGE_SET = new Set<string>(SUPPORTED_DEEPGRAM_LANGUAGES);
 
 interface DeepgramWord {
   start?: number;
@@ -86,6 +86,7 @@ interface DeepgramAlternative {
   transcript?: string;
   words?: DeepgramWord[];
   duration?: number;
+  confidence?: number;
   speaker?: number | string;
 }
 
@@ -522,7 +523,7 @@ export class DeepgramAdapter extends BaseAdapter {
         ...headers,
         'Content-Length': String(buffer.length),
       },
-      body: buffer,
+      body: new Uint8Array(buffer),
       signal: controller.signal,
     };
     try {

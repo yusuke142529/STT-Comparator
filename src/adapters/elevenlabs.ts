@@ -442,7 +442,7 @@ export class ElevenLabsAdapter extends BaseAdapter {
             'Content-Type': contentType,
             'Content-Length': String(body.length),
           },
-          body,
+          body: new Uint8Array(body),
           signal: abortController.signal,
         });
         if (!response.ok) {

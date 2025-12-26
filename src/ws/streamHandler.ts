@@ -16,6 +16,7 @@ import {
 } from '../utils/providerAudio.js';
 import type {
   ProviderId,
+  PartialTranscript,
   RealtimeLogPayload,
   RealtimeLatencySummary,
   RealtimeTranscriptLogEntry,

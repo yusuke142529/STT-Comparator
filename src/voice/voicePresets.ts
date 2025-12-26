@@ -1,4 +1,5 @@
-import type { AppConfig, VoiceAgentMode } from '../types.js';
+import type { VoiceAgentMode } from '../types.js';
+import type { AppConfig } from '../config.js';
 import type { VoiceProviders } from './voiceProviders.js';
 import {
   SUPPORTED_VOICE_STT_PROVIDERS,

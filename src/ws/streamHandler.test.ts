@@ -152,7 +152,10 @@ describe('handleStreamConnection', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2024-01-01T00:00:00.000Z'));
     const logStore: RealtimeTranscriptLogWriter = {
+      init: vi.fn(async () => {}),
       append: vi.fn(async () => {}),
+      readSession: vi.fn(async () => []),
+      listSessions: vi.fn(async () => []),
     };
     const { handleStreamConnection } = await import('./streamHandler.js');
     const ws = new FakeWebSocket();
@@ -177,7 +180,9 @@ describe('handleStreamConnection', () => {
     expect(sessionEntry).toBeDefined();
     expect(transcriptEntry).toBeDefined();
     expect(transcriptEntry?.sessionId).toBe(sessionEntry?.sessionId);
-    expect(typeof transcriptEntry?.payload.latencyMs).toBe('number');
+    if (transcriptEntry?.payload.type === 'transcript') {
+      expect(typeof transcriptEntry.payload.latencyMs).toBe('number');
+    }
   });
 
   it('avoids sending transcripts when text/isFinal/channel matches the last payload', async () => {

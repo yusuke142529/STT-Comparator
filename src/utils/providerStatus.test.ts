@@ -39,7 +39,7 @@ vi.mock('ws', () => {
 
 import { computeProviderAvailability } from './providerStatus.js';
 import { getWhisperRuntime, resetWhisperRuntimeCache } from './whisper.js';
-import type { AppConfig } from '../types.js';
+import type { AppConfig } from '../config.js';
 
 const mockGetWhisperRuntime = getWhisperRuntime as unknown as ReturnType<typeof vi.fn>;
 const mockReset = resetWhisperRuntimeCache as unknown as ReturnType<typeof vi.fn>;
@@ -51,6 +51,8 @@ const baseConfig: AppConfig = {
   providers: ['local_whisper'],
   jobs: {},
   ws: {},
+  providerHealth: {},
+  providerLimits: {},
 };
 
 describe('computeProviderAvailability(local_whisper)', () => {

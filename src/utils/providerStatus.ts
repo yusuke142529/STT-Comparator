@@ -1,4 +1,5 @@
-import type { AppConfig, ProviderId } from '../types.js';
+import type { ProviderId } from '../types.js';
+import type { AppConfig } from '../config.js';
 import { listAdapters } from '../adapters/index.js';
 import { getWhisperRuntime, resetWhisperRuntimeCache } from './whisper.js';
 import { WhisperStreamingHealthMonitor } from './whisperStreamingHealthMonitor.js';
@@ -26,8 +27,15 @@ function createStatusError(message: string, statusCode = 400): StatusCodeError {
   return error;
 }
 
+export interface ProviderHealthMonitor {
+  updateRefreshMs(ms: number): void;
+  triggerCheck(): void;
+  getSnapshot(): { available: boolean; reason?: string };
+  forceCheck(): Promise<void>;
+}
+
 interface ComputeProviderAvailabilityOptions {
-  monitor?: WhisperStreamingHealthMonitor;
+  monitor?: ProviderHealthMonitor;
   forceHealthCheck?: boolean;
 }
 

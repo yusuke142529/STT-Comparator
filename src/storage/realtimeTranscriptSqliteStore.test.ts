@@ -1,11 +1,13 @@
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type DatabaseConstructor from 'better-sqlite3';
+import type BetterSqlite3 from 'better-sqlite3';
+import { describe, it, expect } from 'vitest';
 import { RealtimeTranscriptSqliteStore } from './realtimeTranscriptSqliteStore.js';
 import type { RealtimeTranscriptLogEntry } from '../types.js';
 
 let sqliteAvailable = true;
+type DatabaseConstructor = typeof BetterSqlite3;
 let Database: DatabaseConstructor;
 try {
   Database = require('better-sqlite3');
@@ -60,7 +62,9 @@ describe('RealtimeTranscriptSqliteStore', () => {
     const store = new RealtimeTranscriptSqliteStore(dbPath);
     await store.init();
 
-    const columns = new Database(dbPath).prepare(`PRAGMA table_info('realtime_logs')`).all();
+    const columns = new Database(dbPath)
+      .prepare(`PRAGMA table_info('realtime_logs')`)
+      .all() as Array<{ name: string }>;
     expect(columns.some((col) => col.name === 'speakerId')).toBe(true);
   });
 });

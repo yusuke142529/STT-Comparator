@@ -1,4 +1,5 @@
-import type { AppConfig, ProviderId } from '../types.js';
+import type { ProviderId } from '../types.js';
+import type { AppConfig } from '../config.js';
 
 /**
  * Returns the preferred input sample rate for a provider.

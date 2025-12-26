@@ -83,8 +83,17 @@ export class JsonlStore<T> implements StorageDriver<T> {
   }
 
   private extractTimestamp(row: T): number | null {
-    const candidateRecord = row as { createdAt?: string; endedAt?: string; startedAt?: string };
-    const candidate = candidateRecord.createdAt ?? candidateRecord.endedAt ?? candidateRecord.startedAt;
+    const candidateRecord = row as {
+      createdAt?: string;
+      endedAt?: string;
+      startedAt?: string;
+      recordedAt?: string;
+    };
+    const candidate =
+      candidateRecord.createdAt ??
+      candidateRecord.endedAt ??
+      candidateRecord.startedAt ??
+      candidateRecord.recordedAt;
     const ts = candidate ? Date.parse(candidate as string) : NaN;
     return Number.isFinite(ts) ? ts : null;
   }

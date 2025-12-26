@@ -138,8 +138,8 @@ describe('DeepgramAdapter batch', () => {
     } as unknown as Response;
     const globalWithFetch = globalThis as typeof globalThis & { fetch: typeof fetch };
     const originalFetch = globalWithFetch.fetch;
-    const fetchMock = vi.fn().mockResolvedValue(fakeResponse) as typeof fetch;
-    globalWithFetch.fetch = fetchMock;
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse);
+    globalWithFetch.fetch = fetchMock as unknown as typeof fetch;
 
     try {
     await adapter.transcribeFileFromPCM(stream, {
@@ -187,8 +187,8 @@ describe('DeepgramAdapter batch', () => {
     } as unknown as Response;
     const globalWithFetch = globalThis as typeof globalThis & { fetch: typeof fetch };
     const originalFetch = globalWithFetch.fetch;
-    const fetchMock = vi.fn().mockResolvedValue(fakeResponse) as typeof fetch;
-    globalWithFetch.fetch = fetchMock;
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse);
+    globalWithFetch.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       await adapter.transcribeFileFromPCM(stream, {

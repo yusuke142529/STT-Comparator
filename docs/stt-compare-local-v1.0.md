@@ -1,5 +1,5 @@
 # STT-Compare Local 仕様 v1.0
-作成日: 2025-11-19
+作成日: 2025-12-26
 
 ## 0. 概要
 ### 0.1 背景と目的
@@ -7,7 +7,7 @@
 
 ### 0.2 成果物（Deliverables）
 - ローカル実行可能なアプリ（Web UI + ローカルサーバ）
-- プロバイダ差し替え可能な Adapter 群（現行バンドルは Mock + Deepgram + ElevenLabs。その他は拡張用雛形）
+- プロバイダ差し替え可能な Adapter 群（現行バンドルは Deepgram / ElevenLabs / OpenAI / local_whisper / whisper_streaming。`mock` は任意追加）
 - 評価モジュール（WER/CER/レイテンシ/RTFなど）
 - 設定ファイル・環境変数テンプレート・README
 - サンプルデータと評価マニフェスト（JSON）雛形
@@ -23,12 +23,13 @@
 ### 1.1 対象
 - リアルタイムASR（マイク入力 → UI へ部分／確定結果表示）
 - バッチASR（WAV等のファイル → テキスト）
+- 音声会話（Voice Agent: STT/LLM/TTS の簡易対話。ローカル用途向け）
 - 評価（CER/WER/RTF/各種遅延・安定性）
 - 結果の保存・可視化・エクスポート
 - 複数ASRプロバイダのプラガブル化
 
 ### 1.2 非対象（当面）
-- 高度な会話理解・要約・翻訳
+- 高度な会話理解・要約・翻訳（Voice Agent は簡易対話のみ）
 - 自動話者分離・音源分離（将来拡張）
 - クラウド側のジョブ管理／コスト最適化
 - 商用配布用インストーラ（必要なら Tauri/Electron 包材は拡張）
@@ -83,13 +84,14 @@
 ```
 Web UI (React/TS) -> WS(JSON config + binary PCM frames) -> Local Node Server
 Node Server: Transmux (FFmpeg), Router, Scoring, Storage (JSONL/SQLite), CSV/JSON export
-Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisper（Batchのみ） / whisper_streaming（Realtime/Batch） / mock（ローカル確認/テスト用のスタブ。デフォルト設定には含めていない）。他クラウドは任意拡張（デフォルト無効）
+Adapters: deepgram / elevenlabs / openai / local_whisper（Batchのみ） / whisper_streaming（Realtime/Batch） / mock（ローカル確認/テスト用のスタブ。デフォルト設定には含めていない）。他クラウドは任意拡張（デフォルト無効）
 ```
 
 ## 7. モジュール構成と責務
 - Web UI: マイク制御、WS接続、部分／確定表示、条件選択、バッチ評価UI、結果可視化。
   - 句読点ポリシー（none/basic/full）をUIで切替可能。
-- Transmux: 互換モード（webm/opus 等）の場合は FFmpeg → PCM(16k mono, linear16) 変換し Adapter に送る。preview/replay/batch のアップロードファイルも受信直後に FFmpeg の strict フラグ（`-v error -xerror -err_detect explode` など）で 16k mono PCM WAV に正規化し、デコードエラーや 100ms 未満の出力しか得られない壊れた音源は 400 で拒否する。正規化パラメータは `config.json.ingressNormalize`（サンプルレート/チャンネル/ピークヘッドルーム）で統一管理し、`AUDIO_UNSUPPORTED_FORMAT` を UI へ返して再試行を促す。
+- Voice Agent: STT/LLM/TTS の簡易対話、barge-in、会議音声入力／出力のルーティング。
+- Transmux: 互換モード（webm/opus 等）の場合は FFmpeg → PCM(16k mono, linear16) 変換し Adapter に送る。preview/replay/batch のアップロードファイルも受信直後に FFmpeg の strict フラグ（`-v error -xerror -err_detect explode` など）で 16k mono PCM WAV に正規化し、デコードエラーや 100ms 未満の出力しか得られない壊れた音源は **preview/replay では 422**（`AUDIO_UNSUPPORTED_FORMAT` / `AUDIO_TOO_LONG`）で拒否し、batch はファイル単位で失敗として記録する。必要に応じて strict decode 失敗時に degraded 変換へフォールバックし、`degraded:true` を返す。正規化パラメータは `config.json.ingressNormalize`（サンプルレート/チャンネル/ピークヘッドルーム）で統一管理する。
 - Router: ProviderId 解決、セッションライフサイクル管理、コンテキスト管理。
 - Provider Adapter: API/SDK/WS/gRPC への接続、PCM送信、結果正規化、supportsStreaming/batch を表現。
 - Scoring: 正規化、CER/WER/RTF 算出、レイテンシ算出、p50/p95 集計。
@@ -97,13 +99,15 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 
 ## 8. データフロー（シーケンス）
 ### 8.1 リアルタイム（マイク）
-1. Start → AudioWorklet（PCM収録）開始 → WS `/ws/stream?provider=<id>&lang=<bcp47>` 接続。
+1. Start → AudioWorklet（PCM収録）開始 → WS 接続。
+   - 単一: `/ws/stream?provider=<id>&lang=<bcp47>`
+   - 比較: `/ws/stream/compare?providers=<id1>,<id2>&lang=<bcp47>`
    - チャネル分離（L/R）は単一プロバイダ時のみ対応（`/ws/stream/compare` では非対応）。
 2. 接続直後に StreamingConfigMessage（`pcm:true` + `clientSampleRate` 必須）を送信。
 3. 約250msごとに PCM16LE のフレームをバイナリ送信（ヘッダ + PCM）。
 4. サーバで必要に応じて provider 要求サンプルレートへリサンプル → Adapter.startStreaming → PCM を逐次送信。
 5. Adapter が Interim/Final を PartialTranscript に正規化。
-6. Server → UI: StreamTranscriptMessage(JSON) を送信し、`latencyMs`/`originCaptureTs` を付与（captureTs ベース）。
+6. Server → UI: StreamSessionMessage を送信後、StreamTranscriptMessage/NormalizedTranscriptMessage(JSON) を送信し、`latencyMs`/`originCaptureTs` を付与（captureTs ベース）。
 7. UI 表示、エラーはトースト。
 8. Stop で Worklet 停止 → Adapter end → WS close。
 
@@ -116,8 +120,13 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 
 ## 9. インタフェース仕様（厳密）
 ### 9.1 WebSocket
-- パス: `/ws/stream?provider=<id>&lang=<bcp47>`
-- 接続直後: UI → config JSON → 音声バイナリ送信 → Server → StreamServerMessage。
+- パス:
+  - `/ws/stream?provider=<id>&lang=<bcp47>`（単一ストリーム）
+  - `/ws/stream/compare?providers=<id1>,<id2>&lang=<bcp47>`（比較ストリーム）
+  - `/ws/replay?provider=<id>&lang=<bcp47>&sessionId=<id>`（内部再生・単一）
+  - `/ws/replay?providers=<id1>,<id2>&lang=<bcp47>&sessionId=<id>`（内部再生・比較）
+  - `/ws/voice?lang=<bcp47>`（音声会話）
+- 接続直後: UI → config JSON → 音声バイナリ送信 → Server → StreamServerMessage（voice は VoiceServerMessage）。
 - StreamingConfigMessage 例:
 ```
 {
@@ -153,27 +162,42 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 ```
 - エラー: `{ "type": "error", "message": "..." }`
 
-### 9.2 HTTP（バッチ）
-- POST `/api/jobs/transcribe` (multipart/form-data): files[], (provider | providers), lang, ref_json (任意), options (任意)。
+### 9.2 HTTP（バッチ / Realtime / Voice）
+- GET `/api/config` → `{ audio: { chunkMs } }`
+- GET `/api/providers` → Provider availability + capability flags
+- POST `/api/jobs/transcribe` (multipart/form-data): files[], (provider | providers), lang, ref_json (任意), options (任意)
   - `provider`: 単一プロバイダ
   - `providers`: 複数プロバイダ（同一ファイルを同条件で並列評価し、結果は provider ごとに1行ずつ返る）
-- Response: `{ "jobId": "uuid", "queued": 10 }`
+  - Response: `{ "jobId": "uuid", "queued": 10 }`
+- GET `/api/jobs` → ジョブ履歴一覧
 - GET `/api/jobs/:jobId/status` → `{ jobId, total, done, failed }`
 - GET `/api/jobs/:jobId/results?format=csv|json`
-  - CSV カラム例: path,provider,lang,cer,wer,rtf,latency_ms,text,ref_text
-  - JSON 例: `{ path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, text, refText, opts }`
+  - CSV カラム: path,provider,lang,cer,wer,rtf,latency_ms,degraded,normalization,text,ref_text
+  - JSON 例: `{ path, provider, lang, durationSec, processingTimeMs, rtf, cer, wer, latencyMs, text, refText, normalizationUsed, vendorProcessingMs, createdAt, opts }`
   - CSVはsnake_case、JSONはcamelCase。
-  - GET `/api/jobs/:jobId/summary` → `{ count, cer:{n,avg,p50,p95}, wer:{...}, rtf:{...}, latencyMs:{...} }`
+- GET `/api/jobs/:jobId/summary` → `{ count, cer:{n,avg,p50,p95}, wer:{...}, rtf:{...}, latencyMs:{...} }`
+  - `groupBy=provider` を指定すると provider 別集計を返す。
+- GET `/api/realtime/latency?limit=20` → 直近セッションのレイテンシ集計
+- GET `/api/realtime/log-sessions?limit=50` → セッション一覧
+- GET `/api/realtime/logs/:sessionId` → セッションログ
+- POST `/api/realtime/preview` (multipart/form-data: file) → `{ previewId, previewUrl, degraded }`
+- GET `/api/realtime/preview/:id` → audio/wav
+- POST `/api/realtime/replay` (multipart/form-data: file, provider|providers, lang) → `{ sessionId, filename, createdAt, degraded }`
+- GET `/api/voice/status` → Voice preset availability / missing env
 
 ### 9.5 リアルタイム: 内部再生
-- `POST /api/realtime/replay` (multipart/form-data: `file`, `provider`, `lang`) でファイルをアップロードし `sessionId` を返却。プロバイダは `streaming` 判定済みである必要があり、サーバは `ReplaySessionStore` に一時保存（TTL 5 分）し、録音なしでも同じ FFmpeg → Adapter の経路を再現する。
-- UI は返却された `sessionId` を使って `WS /ws/replay?provider=<id>&lang=<bcp47>&sessionId=<id>` に接続し、通常の `StreamingConfigMessage` を送信。WS はファイルから PCM を `controller.sendAudio` で送出し、`StreamTranscriptMessage` には `channel:'file'` を付与する。接続終了後、セッションファイルは削除される。
+- `POST /api/realtime/replay` (multipart/form-data: `file`, `provider` または `providers`, `lang`) でファイルをアップロードし `sessionId` を返却。プロバイダは `streaming` 判定済みである必要があり、サーバは `ReplaySessionStore` に一時保存（TTL 5 分）し、録音なしでも同じ FFmpeg → Adapter の経路を再現する。
+- UI は返却された `sessionId` を使って `WS /ws/replay?...` に接続し、通常の `StreamingConfigMessage` を送信。
+  - 単一: `/ws/replay?provider=<id>&lang=<bcp47>&sessionId=<id>`
+  - 比較: `/ws/replay?providers=<id1>,<id2>&lang=<bcp47>&sessionId=<id>`
+  - WS はファイルから PCM を `controller.sendAudio` で送出し、`StreamTranscriptMessage` には `channel:'file'` を付与する。接続終了後、セッションファイルは削除される。
 - CLI の `scripts/realtime-replay.ts` も同様の `StreamingConfigMessage`/WS を使うため、UI の内部再生をベースにスクリプトを組み合わせることでマイクが不要な検証も行える。
 
 ### 9.6 リアルタイム: ログ
-- `GET /api/realtime/logs/:sessionId` — 指定セッションの `session`, `transcript`, `error`, `session_end` を時系列で返す。生成AIなどへ渡すため、1セッション分の `StreamTranscriptMessage`（partial/final）、`latencyMs`、`channel`、`provider`、`timestamp` を含むタイムラインをサーバ側で蓄積しておける。
-- ログ行は `storage.driver` に応じて `runs/<date>/realtime-logs.jsonl`（JSONL）または SQLite 内の `realtime_logs` テーブルへ書きこまれ、`storage.retentionDays`/`storage.maxRows` の範囲で pruning される。`storage.path` を共有するバッチ/latency ログと同じストレージなので、生成AIレビューのために `runs` の任意の日付フォルダを丸ごとコピーしてもよい。
-- エントリ構造: `{ sessionId, provider, lang, recordedAt, payload }`。`payload` は `StreamSessionMessage` (`startedAt`)、`StreamTranscriptMessage`（`text`/`latencyMs`/`isFinal`）、`StreamErrorMessage`（`message`）、`StreamSessionEndMessage`（`endedAt`）のいずれか。
+- `GET /api/realtime/log-sessions?limit=50` — セッション一覧（最新順）を返す。
+- `GET /api/realtime/logs/:sessionId` — 指定セッションの `session`, `transcript`, `normalized`, `error`, `session_end` を時系列で返す。生成AIなどへ渡すため、1セッション分の `StreamTranscriptMessage`（partial/final）、`latencyMs`、`channel`、`provider`、`timestamp` を含むタイムラインをサーバ側で蓄積しておける。
+- ログ行は `storage.driver` に応じて `runs/<date>/realtime-logs.jsonl`（JSONL）または SQLite 内の `realtime_logs` テーブルへ書きこまれ、`storage.retentionDays`/`storage.maxRows` の範囲で pruning される。JSONL/SQLite ともに `recordedAt` を基準に retention を判定する。`storage.path` を共有するバッチ/latency ログと同じストレージなので、生成AIレビューのために `runs` の任意の日付フォルダを丸ごとコピーしてもよい。
+- エントリ構造: `{ sessionId, provider, lang, recordedAt, payload }`。`payload` は `StreamSessionMessage` (`startedAt`)、`StreamTranscriptMessage`（`text`/`latencyMs`/`isFinal`/`speakerId?`）、`NormalizedTranscriptMessage`（`textDelta?`/`speakerId?` など）、`StreamErrorMessage`（`message`）、`StreamSessionEndMessage`（`endedAt`）のいずれか。
 ### 9.3 評価マニフェスト
 ```
 {
@@ -183,6 +207,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": true }
 }
 ```
+`sample-data/manifest.example.json` はテンプレート用の例であり、音声ファイルは同梱していないため `items[].audio` に対応するファイルを用意して下さい。
 
 ### 9.4 Realtime Replay Helper
 - `scripts/realtime-replay.ts` は UI の `/ws/stream`（PCMフレーム）送信経路を TypeScript で模倣し、`ffmpeg -re` で `sample-data` などのファイルを PCM16LE に変換して 250ms フレームとして直接ストリーミングします。このスクリプトを使えば、外部マイクを使えない静音環境でもプロバイダ・言語・マニフェストごとのレイテンシを再現性高く収集できます。
@@ -192,7 +217,7 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 - items[].audio はアップロード files[] のファイル名と一致させる。マッピング不可は警告/エラー。
 
 ## 10. 型仕様（TypeScript）
-  - v1.0 デフォルト: `deepgram`, `elevenlabs`, `local_whisper`, `whisper_streaming`（ローカル常駐 WS/HTTP サーバ, Streaming/Batch 両対応）。`mock` はローカル検証やテスト用途で必要に応じて追加してください。その他は拡張用。
+  - v1.0 デフォルト: `deepgram`, `elevenlabs`, `openai`, `local_whisper`, `whisper_streaming`（ローカル常駐 WS/HTTP サーバ, Streaming/Batch 両対応）。`mock` はローカル検証やテスト用途で必要に応じて追加してください。その他は拡張用。
   - `whisper_streaming`: faster-whisper-server 等のローカル常駐エンドポイントを前提。WS 初期メッセージで language/task/model を送信し、partial/final を受信する。
 - StreamingOptions: language, sampleRateHz(16000), encoding 'linear16', enableInterim?, contextPhrases?
 - TranscriptWord, PartialTranscript (timestamp, channel 'mic'|'file')
@@ -201,7 +226,8 @@ Adapters: deepgram（実装済） / ElevenLabs（Realtime+Batch） / local_whisp
 - StreamingController/StreamingSession インタフェース
 - BatchResult { provider, text, words?, durationSec?, processingTimeMs? }
 - ProviderAdapter { id, supportsStreaming/batch, startStreaming(opts), transcribeFileFromPCM(pcm, opts) }
-- StreamServerMessage = StreamTranscriptMessage | StreamErrorMessage
+- StreamServerMessage = StreamTranscriptMessage | NormalizedTranscriptMessage | StreamErrorMessage | StreamSessionMessage
+- StreamSessionEndMessage は realtime ログ用に追加
 
 補足: encoding は v1.0 で常に linear16。StreamingSession はサーバ ↔ Adapter 間内部IF。
 
@@ -236,18 +262,37 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 {
   "audio": { "targetSampleRate": 16000, "targetChannels": 1, "chunkMs": 250 },
   "normalization": { "nfkc": true, "stripPunct": true, "stripSpace": false },
-  "storage": { "driver": "jsonl", "path": "./runs/2025-11-19" }, // driver は jsonl または sqlite
-  "providers": ["deepgram", "elevenlabs", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
+  "storage": { "driver": "jsonl", "path": "./runs/{date}" }, // driver は jsonl または sqlite（{date} は YYYY-MM-DD に展開）
+  "providers": ["deepgram", "elevenlabs", "openai", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
   "voice": {
     "vad": { "threshold": 0.45, "silenceDurationMs": 500, "prefixPaddingMs": 300 }
   },
   "ws": {
     "maxPcmQueueBytes": 5242880,
+    "overflowGraceMs": 500, // バックログ超過時の猶予
+    "keepaliveMs": 30000,
+    "maxMissedPongs": 2,
+    "meeting": {
+      "maxPcmQueueBytes": 10485760,
+      "overflowGraceMs": 1000
+    },
+    "replay": {
+      "minDurationMs": 100
+    },
     "compare": { "backlogSoft": 8, "backlogHard": 32, "maxDropMs": 1000 } // Realtime比較用バックログ制御
+  },
+  "providerLimits": {
+    "batchMaxBytes": { "openai": 26214400, "deepgram": 52428800 }
   }
 }
 ```
 - 日本語CERでプロバイダが空白を挿入してしまうケースを吸収したい場合は、評価マニフェスト（ref_json）側で `normalization.stripSpace=true` を指定してください（ジョブ単位で切替可能）。
+- `storage.path` は `{date}` プレースホルダを含められ、`YYYY-MM-DD` に展開される（例: `./runs/{date}`）。展開はサーバ起動時に行われるため、日付跨ぎで切り替えるには再起動が必要。
+- `providerLimits.batchMaxBytes` はプロバイダごとのアップロード上限（バイト）を上書きできる。
+- `ws.keepaliveMs` / `ws.maxMissedPongs` は WS の疎通監視設定。
+- `ws.overflowGraceMs` はリアルタイム PCM キュー超過時の猶予時間。
+- `ws.meeting.*` は meetingMode のみ適用される上書き設定。
+- `ws.replay.minDurationMs` は内部再生の最低再生時間（短すぎる音源の誤検知防止）。
 - `providerHealth.refreshMs` を指定すると `/api/providers` のヘルスチェック結果を再計算する間隔（ミリ秒）を調整できます。デフォルト 5000 によりローカルの `whisper_streaming` 等を起動した直後でも数秒で「利用可能」へ切り替わるようになり、同エンドポイントは TTL 内でキャッシュを再利用して過剰なヘルスチェックを防ぎます。即時再評価が必要なときは `/api/admin/reload-config` を叩いてください。
 - `/api/providers` のレスポンスには `supportsDictionaryPhrases` / `supportsPunctuationPolicy` / `supportsContextPhrases` のようなフラグも含まれるため、クライアントはプロバイダごとの機能差を UI 表示や辞書・句読点コントロールの有効/無効に反映できます。
 
@@ -267,9 +312,10 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 - 出力: 平均/p50/p95 を集計し UI と CSV/JSON で可視化。再現性確保。
 
 ## 14. UI仕様（要点）
-- Realtime: プロバイダ選択（現行は Deepgram、ElevenLabs、Whisper Streaming。local_whisper は Batch のみ対応）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。入力ソースはマイクと「内部ファイル再生」のトグルになっており、ファイル選択時は `/api/realtime/replay` で音声をサーバに送り、返却された `sessionId` を使って `/ws/replay` を開くことで mic-less の比較が可能です。
+- Realtime: プロバイダ選択（現行は Deepgram、ElevenLabs、OpenAI、Whisper Streaming。local_whisper は Batch のみ対応）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。入力ソースはマイクと「内部ファイル再生」のトグルになっており、ファイル選択時は `/api/realtime/replay` で音声をサーバに送り、返却された `sessionId` を使って `/ws/replay` を開くことで mic-less の比較が可能です。
+- Voice: 音声会話（STT/LLM/TTS）を UI から開始/停止、プリセット切替、barge-in 対応。Meet モード用のルーティングとモニタ再生を提供。
 - Batch Evaluate: ファイルドロップ、参照マニフェスト、並列度（options.parallel）、VAD/句読点/辞書入力、Run、進捗バー、結果テーブル、CSV/JSON DL。
-- Results: 最新ジョブの p50/p95 要約と per-file テーブル（provider/cer/wer/rtf/latency）。将来的な比較グラフは拡張範囲。
+- Results: 最新ジョブの p50/p95 要約と per-file テーブル（provider/cer/wer/rtf/latency）、簡易チャート（p50/p95）を表示。高度な比較グラフは拡張範囲。
 - 操作: マイク許可必須、ストリーミング中は Stop 常設、プロバイダ切替時はセッションを安全終了。
 
 ## 15. エラーハンドリング・ロギング
@@ -290,7 +336,9 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 ## 18. ディレクトリ構成（推奨）
 ```
 stt-compare-local/
-  public/
+  client/
+    dist/         # UI build output (server serves if present)
+  public/         # fallback static assets (client/dist が無い場合)
   src/
     server.ts
     types.ts

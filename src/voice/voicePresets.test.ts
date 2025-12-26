@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AppConfig } from '../types.js';
+import type { AppConfig } from '../config.js';
 
 const envSnapshot = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -22,8 +22,12 @@ function baseConfig(extra?: Partial<AppConfig>): AppConfig {
   return {
     audio: { targetSampleRate: 16000, targetChannels: 1, chunkMs: 250 },
     normalization: {},
-    storage: { driver: 'jsonl', path: './runs/latest' },
+    storage: { driver: 'jsonl', path: './runs/latest', retentionDays: 30, maxRows: 100000 },
     providers: ['openai'],
+    jobs: {},
+    ws: {},
+    providerHealth: {},
+    providerLimits: {},
     ...extra,
   };
 }

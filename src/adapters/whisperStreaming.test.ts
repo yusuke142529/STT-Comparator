@@ -83,7 +83,7 @@ describe('WhisperStreamingAdapter batch', () => {
   });
 
   it('streams PCM to HTTP endpoint and parses response', async () => {
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => {
       return new Response(
         JSON.stringify({
           text: 'hello world',
@@ -105,7 +105,8 @@ describe('WhisperStreamingAdapter batch', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const headers = (fetchMock.mock.calls[0][1]?.headers ?? {}) as Record<string, string>;
+    const call = fetchMock.mock.calls[0];
+    const headers = ((call?.[1] as RequestInit | undefined)?.headers ?? {}) as Record<string, string>;
     expect(headers['Content-Type']).toContain('audio/l16');
     expect(result.text).toBe('hello world');
     expect(result.words?.[0].text).toBe('hello');
