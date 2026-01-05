@@ -7,6 +7,7 @@ import { bufferToArrayBuffer } from '../utils/buffer.js';
 import { parseStreamFrame } from '../utils/streamHeader.js';
 import { createPcmResampler } from '../utils/ffmpeg.js';
 import { getProviderSampleRate } from '../utils/providerAudio.js';
+import { createMeetingAudioGate } from '../utils/meetingGate.js';
 import { voiceCommandMessageSchema, voiceConfigMessageSchema } from '../validation.js';
 import type {
   ProviderId,
@@ -78,6 +79,7 @@ function defaultWakeWords(lang: string): string[] {
 export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   const config = await loadConfig();
   const voiceVad = config.voice?.vad;
+  const meetingGate = createMeetingAudioGate(config.voice?.meetingGate);
   const sessionId = randomUUID();
   const startedAt = new Date().toISOString();
   const keepaliveMs = config.ws?.keepaliveMs ?? 30_000;
@@ -109,8 +111,14 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   let finalizeTimer: NodeJS.Timeout | null = null;
 
   // Transcripts captured while assistant is speaking (applied only when barge-in happens).
-  let suppressedInterim: { source: VoiceInputSource; text: string } | null = null;
-  const suppressedFinalParts: Array<{ source: VoiceInputSource; text: string }> = [];
+  type TranscriptInfo = {
+    displayText: string;
+    triggerText: string | null;
+    triggered: boolean;
+  };
+  type SuppressedTranscript = { source: VoiceInputSource; info: TranscriptInfo; speakerId?: string };
+  let suppressedInterim: SuppressedTranscript | null = null;
+  const suppressedFinalParts: SuppressedTranscript[] = [];
   const clearSuppressedTranscripts = () => {
     suppressedInterim = null;
     suppressedFinalParts.length = 0;
@@ -181,6 +189,24 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       turnId,
       timestamp: Date.now(),
       reason,
+    };
+    sendJson(msg);
+  };
+
+  const sendUserTranscript = (
+    source: VoiceInputSource,
+    info: TranscriptInfo,
+    isFinal: boolean,
+    speakerId?: string
+  ) => {
+    const msg: VoiceUserTranscriptMessage = {
+      type: 'voice_user_transcript',
+      isFinal,
+      text: info.displayText,
+      timestamp: Date.now(),
+      source,
+      speakerId,
+      triggered: info.triggered,
     };
     sendJson(msg);
   };
@@ -262,17 +288,9 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       const parts = suppressedFinalParts.splice(0);
       let shouldFinalize = false;
       for (const part of parts) {
-        const text = normalizeUserText(part.source, part.text);
-        if (!text) continue;
-        const msg: VoiceUserTranscriptMessage = {
-          type: 'voice_user_transcript',
-          isFinal: true,
-          text,
-          timestamp: Date.now(),
-          source: part.source,
-        };
-        sendJson(msg);
-        if (enqueueFinalPart(part.source, text)) {
+        sendUserTranscript(part.source, part.info, true, part.speakerId);
+        if (part.info.triggerText) {
+          enqueueFinalPart(part.info.triggerText);
           shouldFinalize = true;
         }
       }
@@ -280,19 +298,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
         scheduleFinalize();
       }
     } else if (suppressedInterim) {
-      const text = normalizeUserText(suppressedInterim.source, suppressedInterim.text);
-      if (!text) {
-        clearSuppressedTranscripts();
-        return;
-      }
-      const msg: VoiceUserTranscriptMessage = {
-        type: 'voice_user_transcript',
-        isFinal: false,
-        text,
-        timestamp: Date.now(),
-        source: suppressedInterim.source,
-      };
-      sendJson(msg);
+      sendUserTranscript(suppressedInterim.source, suppressedInterim.info, false, suppressedInterim.speakerId);
     }
     clearSuppressedTranscripts();
   };
@@ -315,9 +321,10 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
 
     try {
       const llmStart = Date.now();
-      const assistantText = await generateChatReply(history, {
+      const rawAssistantText = await generateChatReply(history, {
         signal: abort.signal,
       });
+      const assistantText = sanitizeAssistantText(rawAssistantText);
       const llmMs = Date.now() - llmStart;
 
       if (abort.signal.aborted || closed) {
@@ -426,8 +433,8 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       outputSampleRate,
       channels: 1,
     });
-    created.onChunk((chunk) => {
-      void sendAudioToBackend(source, chunk);
+    created.onChunk((chunk, meta) => {
+      void handlePcmChunk(source, chunk, meta);
     });
     created.onError((err) => handleFatal(err));
     created.onClose((code) => {
@@ -486,10 +493,37 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
 
   let meetingModeEnabled = false;
   let meetingRequireWakeWord = false;
+  let meetingOutputEnabled = false;
   let wakeWords: string[] = [];
 
+  async function handlePcmChunk(
+    source: VoiceInputSource,
+    pcm: Buffer,
+    meta?: { captureTs?: number; durationMs?: number }
+  ) {
+    if (source === 'meeting' && meetingModeEnabled && meetingOutputEnabled && voiceState === 'speaking') {
+      return;
+    }
+    if (source === 'meeting' && meetingModeEnabled && meetingGate.config.enabled) {
+      const decision = meetingGate.shouldForward(pcm, {
+        captureTs: meta?.captureTs,
+        durationMs: meta?.durationMs,
+        assistantSpeaking: meetingOutputEnabled && voiceState === 'speaking',
+        sampleRateHz: outputSampleRate,
+      });
+      if (!meetingRequireWakeWord && decision.speechDetected) {
+        if (voiceState === 'speaking' || assistantTurn?.state === 'thinking') {
+          stopAssistant('barge_in');
+          applySuppressedTranscripts();
+        }
+      }
+      if (!decision.allow) return;
+    }
+    await sendAudioToBackend(source, pcm);
+  }
+
   const meetingSystemPromptSuffix =
-    '\n\nあなたはWeb会議に参加しています。ユーザー発話には [me] (このPCのマイク) と [meeting] (会議タブ音声) のラベルが付くことがあります。会議の妨げにならないよう、簡潔に返答してください。';
+    '\n\nあなたはWeb会議に参加しています。会議の妨げにならないよう、簡潔に返答してください。';
 
   const applyMeetingSystemPrompt = () => {
     if (!meetingModeEnabled) return;
@@ -502,23 +536,29 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     };
   };
 
-  const formatHistoryText = (source: VoiceInputSource, text: string, meetingMode: boolean) => {
-    if (!meetingMode) return text;
-    return source === 'meeting' ? `[meeting] ${text}` : `[me] ${text}`;
+  const sanitizeAssistantText = (text: string): string => {
+    if (!meetingModeEnabled) return text;
+    return text.replace(/(^|\n)\s*\[(meeting|me)\]\s*/gi, '$1').trim();
   };
 
-  const normalizeUserText = (source: VoiceInputSource, text: string): string | null => {
-    const trimmed = text.trim();
-    if (!trimmed) return null;
-    if (source !== 'meeting' || !meetingRequireWakeWord) return trimmed;
-    const stripped = stripWakeWordPrefix(trimmed, wakeWords);
-    if (!stripped.matched) return null;
-    return stripped.cleaned.trim();
+  const buildTranscriptInfo = (source: VoiceInputSource, text: string): TranscriptInfo | null => {
+    const displayText = text.trim();
+    if (!displayText) return null;
+    if (source !== 'meeting' || !meetingRequireWakeWord) {
+      return { displayText, triggerText: displayText, triggered: true };
+    }
+    const stripped = stripWakeWordPrefix(displayText, wakeWords);
+    if (!stripped.matched) {
+      return { displayText, triggerText: null, triggered: false };
+    }
+    const cleaned = stripped.cleaned.trim();
+    const triggerText = cleaned || displayText;
+    return { displayText, triggerText, triggered: true };
   };
 
-  const enqueueFinalPart = (source: VoiceInputSource, text: string) => {
+  const enqueueFinalPart = (text: string) => {
     if (!text) return false;
-    pendingFinalParts.push(formatHistoryText(source, text, meetingModeEnabled));
+    pendingFinalParts.push(text);
     return true;
   };
 
@@ -662,14 +702,14 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
           const active = realtimeActive;
           if (!active || active.responseId !== responseId) return;
           if (active.ignoreOutput) return;
-          const trimmed = text.trim();
-          if (!trimmed) return;
+          const sanitized = sanitizeAssistantText(text.trim());
+          if (!sanitized) return;
           if (!active.assistantTextSent) {
             active.assistantTextSent = true;
             const textMsg: VoiceAssistantTextMessage = {
               type: 'voice_assistant_text',
               turnId: active.turnId,
-              text: trimmed,
+              text: sanitized,
               isFinal: true,
               timestamp: Date.now(),
             };
@@ -711,6 +751,8 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     ttsProvider = selectedTtsProvider;
 
     meetingModeEnabled = msg.options?.meetingMode === true || (msg.channelSplit === true && msg.channels === 2);
+    meetingGate.reset();
+    meetingOutputEnabled = meetingModeEnabled && msg.options?.meetingOutputEnabled === true;
     wakeWords = (msg.options?.wakeWords ?? []).map((w) => w.trim()).filter(Boolean);
     if (wakeWords.length === 0) {
       wakeWords = defaultWakeWords(lang);
@@ -771,34 +813,26 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
 
     const handleSttTranscript = (source: VoiceInputSource, t: { isFinal: boolean; text: string; speakerId?: string }) => {
       if (closed) return;
-      const text = normalizeUserText(source, t.text);
-      if (!text) return;
+      const info = buildTranscriptInfo(source, t.text);
+      if (!info) return;
 
       // If the user starts talking while the assistant is still thinking, abort the in-flight turn.
-      if (assistantTurn?.state === 'thinking' && text) {
+      if (assistantTurn?.state === 'thinking' && info.triggerText) {
         stopAssistant('barge_in');
       }
 
       if (voiceState === 'speaking') {
         if (t.isFinal) {
-          if (text) suppressedFinalParts.push({ source, text });
+          suppressedFinalParts.push({ source, info, speakerId: t.speakerId });
         } else {
-          suppressedInterim = text.length > 0 ? { source, text } : suppressedInterim;
+          suppressedInterim = { source, info, speakerId: t.speakerId };
         }
         return;
       }
 
-      const msgPayload: VoiceUserTranscriptMessage = {
-        type: 'voice_user_transcript',
-        isFinal: t.isFinal,
-        text,
-        timestamp: Date.now(),
-        source,
-        speakerId: t.speakerId,
-      };
-      sendJson(msgPayload);
-      if (t.isFinal && text) {
-        if (enqueueFinalPart(source, text)) {
+      sendUserTranscript(source, info, t.isFinal, t.speakerId);
+      if (t.isFinal && info.triggerText) {
+        if (enqueueFinalPart(info.triggerText)) {
           scheduleFinalize();
         }
       }
@@ -939,7 +973,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
           });
           return;
         }
-        await sendAudioToBackend(source, pcm);
+        await handlePcmChunk(source, pcm, header);
       } catch (err) {
         handleFatal(err as Error);
       }

@@ -39,11 +39,37 @@ const voiceVadSchema = z
   .partial()
   .default({});
 
+const meetingGateVadSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.number().int().min(0).max(3).optional(),
+    frameMs: z.number().int().min(10).max(30).optional(),
+    minSpeechFrames: z.number().int().min(1).max(10).optional(),
+    speechRatio: z.number().min(0.1).max(1).optional(),
+  })
+  .partial()
+  .default({});
+
+const voiceMeetingGateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    minRms: z.number().min(0).max(1).optional(),
+    noiseAlpha: z.number().min(0).max(1).optional(),
+    openFactor: z.number().min(1).max(20).optional(),
+    closeFactor: z.number().min(1).max(20).optional(),
+    hangoverMs: z.number().int().min(0).max(5000).optional(),
+    assistantGuardFactor: z.number().min(1).max(5).optional(),
+    vad: meetingGateVadSchema.optional(),
+  })
+  .partial()
+  .default({});
+
 const voiceSchema = z
   .object({
     presets: z.array(voicePresetSchema).min(1).max(20).optional(),
     defaultPresetId: z.string().min(1).max(50).optional(),
     vad: voiceVadSchema.optional(),
+    meetingGate: voiceMeetingGateSchema.optional(),
   })
   .partial()
   .default({});

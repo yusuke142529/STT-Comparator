@@ -265,7 +265,23 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
   "storage": { "driver": "jsonl", "path": "./runs/{date}" }, // driver は jsonl または sqlite（{date} は YYYY-MM-DD に展開）
   "providers": ["deepgram", "elevenlabs", "openai", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
   "voice": {
-    "vad": { "threshold": 0.45, "silenceDurationMs": 500, "prefixPaddingMs": 300 }
+    "vad": { "threshold": 0.45, "silenceDurationMs": 500, "prefixPaddingMs": 300 },
+    "meetingGate": {
+      "enabled": true,
+      "minRms": 0.01,
+      "noiseAlpha": 0.03,
+      "openFactor": 3.0,
+      "closeFactor": 1.8,
+      "hangoverMs": 250,
+      "assistantGuardFactor": 1.5,
+      "vad": {
+        "enabled": true,
+        "mode": 1,
+        "frameMs": 20,
+        "minSpeechFrames": 2,
+        "speechRatio": 0.3
+      }
+    }
   },
   "ws": {
     "maxPcmQueueBytes": 5242880,
@@ -302,6 +318,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 - チャンク: 250ms（config.audio.chunkMs）。
 - VAD: オプション、公平比較では OFF をデフォルト。
 - Voice会話の server VAD は `config.voice.vad` で閾値/無音長/プレフィックスを調整可能（Realtime比較には影響しない）。
+- Meet モードの会議音声ゲートは `config.voice.meetingGate` で調整可能（VAD＋通知音ガードで誤反応を抑制）。`meetingGate.vad.mode` を上げるほど厳しめになります。
 
 ## 13. 評価設計
 - 正規化（基本）: NFKC → 句読点除去。WER の単語境界を壊さないため、空白は保持（`stripSpace=false`）を基本とする。

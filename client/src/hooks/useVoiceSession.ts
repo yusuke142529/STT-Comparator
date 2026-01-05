@@ -18,6 +18,7 @@ type ChatItem = {
   turnId?: string;
   source?: VoiceInputSource;
   speakerId?: string;
+  triggered?: boolean;
 };
 
 type VoiceTimings = {
@@ -91,7 +92,12 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
   const [state, setState] = useState<VoiceState>('listening');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatItem[]>([]);
-  const [interim, setInterim] = useState<{ text: string; source?: VoiceInputSource; speakerId?: string } | null>(
+  const [interim, setInterim] = useState<{
+    text: string;
+    source?: VoiceInputSource;
+    speakerId?: string;
+    triggered?: boolean;
+  } | null>(
     null
   );
   const [lastTimings, setLastTimings] = useState<VoiceTimings | null>(null);
@@ -124,6 +130,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
   const assistantWarmupFramesRef = useRef(0);
   const assistantStartMsRef = useRef(0);
   const monitorAssistantRef = useRef(true);
+  const meetOutputEnabledRef = useRef(false);
   const sessionReadyRef = useRef(false);
   const prerollQueueRef = useRef<Array<{ packet: ArrayBuffer; durationMs: number }>>([]);
   const prerollDurationMsRef = useRef(0);
@@ -209,6 +216,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     wsRef.current?.close();
     wsRef.current = null;
     speakingRef.current = false;
+    meetOutputEnabledRef.current = false;
     bargeAboveMicRef.current = 0;
     bargeAboveMeetingRef.current = 0;
     assistantRmsEmaRef.current = 0;
@@ -276,6 +284,12 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
           }
         }
       }
+      if (source === 'meeting' && meetOutputEnabledRef.current) {
+        const assistantRms = assistantRmsEmaRef.current;
+        if (assistantRms > 0) {
+          effectiveThreshold = Math.max(effectiveThreshold, assistantRms * ASSISTANT_ECHO_GUARD_FACTOR);
+        }
+      }
 
       if (rms > effectiveThreshold) {
         aboveRef.current += 1;
@@ -323,6 +337,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     monitorAssistantRef.current = monitorAssistant;
     const monitorOutputDeviceId = meeting?.monitorOutputDeviceId?.trim();
     const enableMeetOutput = meeting?.enableMeetOutput === true;
+    meetOutputEnabledRef.current = enableMeetOutput;
     const meetOutputDeviceId = meeting?.meetOutputDeviceId?.trim();
     const allowMicToMeet = meeting?.allowMicToMeet !== false;
     const meetingRequireWakeWord = meeting?.meetingRequireWakeWord ?? true;
@@ -455,6 +470,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             ? {
                 meetingMode: true,
                 meetingRequireWakeWord,
+                meetingOutputEnabled: enableMeetOutput,
                 wakeWords: wakeWords.length > 0 ? wakeWords : DEFAULT_WAKE_WORDS,
               }
             : undefined,
@@ -526,10 +542,16 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
                   ts: payload.timestamp,
                   source: payload.source,
                   speakerId: payload.speakerId,
+                  triggered: payload.triggered,
                 },
               ]);
             } else {
-              setInterim({ text: payload.text, source: payload.source, speakerId: payload.speakerId });
+              setInterim({
+                text: payload.text,
+                source: payload.source,
+                speakerId: payload.speakerId,
+                triggered: payload.triggered,
+              });
             }
             return;
           }
@@ -621,16 +643,20 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
 
         if (payload.channelSplit && payload.pcmLeft && payload.pcmRight) {
           sendFrame(payload.seq * 2, payload.pcmLeft);
-          sendFrame(payload.seq * 2 + 1, payload.pcmRight);
+          const suppressMeeting = enableMeetOutput && speakingRef.current;
+          if (!suppressMeeting) {
+            sendFrame(payload.seq * 2 + 1, payload.pcmRight);
+          }
 
           const rmsMic = computeRms(payload.pcmLeft);
           noiseEmaMicRef.current = noiseEmaMicRef.current * 0.97 + rmsMic * 0.03;
           updateMicRms(rmsMic);
           maybeBargeIn('mic', rmsMic);
 
-          const rmsMeeting = computeRms(payload.pcmRight);
-          noiseEmaMeetingRef.current = noiseEmaMeetingRef.current * 0.97 + rmsMeeting * 0.03;
-          maybeBargeIn('meeting', rmsMeeting);
+          if (!suppressMeeting) {
+            const rmsMeeting = computeRms(payload.pcmRight);
+            noiseEmaMeetingRef.current = noiseEmaMeetingRef.current * 0.97 + rmsMeeting * 0.03;
+          }
           return;
         }
 

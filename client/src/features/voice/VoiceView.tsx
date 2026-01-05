@@ -589,7 +589,7 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
               {item.role === 'user' && item.source === 'meeting' ? (
                 <span>
                   <span style={{ color: 'var(--c-text-muted)', marginRight: 6 }}>
-                    （会議{item.speakerId ? `:${item.speakerId}` : ''}）
+                    （{`${item.triggered === false ? '会議/応答なし' : '会議'}${item.speakerId ? `:${item.speakerId}` : ''}`}）
                   </span>
                   {item.text}
                 </span>
@@ -603,7 +603,7 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
               {session.interim.source === 'meeting' ? (
                 <span>
                   <span style={{ color: 'var(--c-text-muted)', marginRight: 6 }}>
-                    （会議{session.interim.speakerId ? `:${session.interim.speakerId}` : ''}）
+                    （{`${session.interim.triggered === false ? '会議/応答なし' : '会議'}${session.interim.speakerId ? `:${session.interim.speakerId}` : ''}`}）
                   </span>
                   {session.interim.text}
                 </span>

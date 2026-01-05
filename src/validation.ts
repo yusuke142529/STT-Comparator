@@ -55,6 +55,7 @@ export const voiceConfigMessageSchema = z
         finalizeDelayMs: z.number().int().min(0).max(10_000).optional(),
         meetingMode: z.boolean().optional(),
         meetingRequireWakeWord: z.boolean().optional(),
+        meetingOutputEnabled: z.boolean().optional(),
         wakeWords: z.array(z.string().min(1).max(40)).max(20).optional(),
       })
       .partial()

@@ -34,6 +34,17 @@
   "providerHealth": {
     "refreshMs": 5000
   },
+  "voice": {
+    "meetingGate": {
+      "enabled": true,
+      "minRms": 0.01,
+      "noiseAlpha": 0.03,
+      "openFactor": 3.0,
+      "closeFactor": 1.8,
+      "hangoverMs": 250,
+      "assistantGuardFactor": 1.5
+    }
+  },
   "ws": {
     "maxPcmQueueBytes": 5242880,
     "compare": {

@@ -242,6 +242,8 @@ export interface VoiceConfigMessage {
     meetingMode?: boolean;
     /** Require wake words for meeting audio to trigger replies. */
     meetingRequireWakeWord?: boolean;
+    /** Whether assistant audio is routed into the meeting output (affects gating). */
+    meetingOutputEnabled?: boolean;
     /** Wake words used when meetingRequireWakeWord is enabled. */
     wakeWords?: readonly string[];
   };
@@ -284,6 +286,8 @@ export interface VoiceUserTranscriptMessage {
   timestamp: number;
   source?: VoiceInputSource;
   speakerId?: string;
+  /** Whether this transcript can trigger assistant responses (e.g., wake word matched). */
+  triggered?: boolean;
 }
 
 export interface VoiceAssistantTextMessage {

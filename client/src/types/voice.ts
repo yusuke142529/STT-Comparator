@@ -29,6 +29,7 @@ export interface VoiceUserTranscriptMessage {
   timestamp: number;
   source?: VoiceInputSource;
   speakerId?: string;
+  triggered?: boolean;
 }
 
 export interface VoiceAssistantTextMessage {
@@ -86,6 +87,7 @@ export interface VoiceClientConfigMessage {
     finalizeDelayMs?: number;
     meetingMode?: boolean;
     meetingRequireWakeWord?: boolean;
+    meetingOutputEnabled?: boolean;
     wakeWords?: readonly string[];
   };
 }
