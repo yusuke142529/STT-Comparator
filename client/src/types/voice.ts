@@ -55,6 +55,14 @@ export interface VoiceAssistantAudioEndMessage {
   reason?: 'completed' | 'barge_in' | 'stopped' | 'error';
 }
 
+export interface VoiceMeetingWindowMessage {
+  type: 'voice_meeting_window';
+  state: 'opened' | 'closed';
+  ts: number;
+  expiresAt?: number;
+  reason?: 'wake_word' | 'timeout' | 'manual' | 'cooldown';
+}
+
 export interface VoicePingMessage {
   type: 'ping';
   ts?: number;
@@ -72,6 +80,7 @@ export type VoiceServerMessage =
   | VoiceAssistantTextMessage
   | VoiceAssistantAudioStartMessage
   | VoiceAssistantAudioEndMessage
+  | VoiceMeetingWindowMessage
   | VoicePingMessage
   | VoiceErrorMessage;
 
@@ -89,6 +98,10 @@ export interface VoiceClientConfigMessage {
     meetingRequireWakeWord?: boolean;
     meetingOutputEnabled?: boolean;
     wakeWords?: readonly string[];
+    meetingOpenWindowMs?: number;
+    meetingCooldownMs?: number;
+    echoSuppressMs?: number;
+    echoSimilarity?: number;
   };
 }
 

@@ -28,6 +28,13 @@ type VoiceTimings = {
   ts: number;
 };
 
+type MeetingWindowState = {
+  open: boolean;
+  expiresAt?: number;
+  reason?: 'wake_word' | 'timeout' | 'manual' | 'cooldown';
+  ts?: number;
+};
+
 const DEFAULT_CHUNK_MS = 50;
 const DEFAULT_WAKE_WORDS = ['アシスタント', 'assistant', 'AI'];
 const ASSISTANT_RMS_ALPHA = 0.12;
@@ -103,6 +110,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
   const [lastTimings, setLastTimings] = useState<VoiceTimings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [meetingWindow, setMeetingWindow] = useState<MeetingWindowState | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const [outputSampleRate, setOutputSampleRate] = useState(DEFAULT_OUTPUT_SAMPLE_RATE);
@@ -228,6 +236,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     lastRmsUpdateRef.current = 0;
     setMicRms(0);
     setWarning(null);
+    setMeetingWindow(null);
     await stopMedia();
     await playerRef.current.close();
   }, [resetPreroll, stopMedia]);
@@ -313,6 +322,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
   const start = useCallback(async (opts?: VoiceStartOptions) => {
     setError(null);
     setWarning(null);
+    setMeetingWindow(null);
     setMessages([]);
     setInterim(null);
     setLastTimings(null);
@@ -503,6 +513,8 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             return;
           }
           if (payload.type === 'error') {
+            playerRef.current.ensure(outputSampleRateRef.current);
+            playerRef.current.playChime('error');
             setError(payload.message);
             return;
           }
@@ -527,6 +539,19 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             if (payload.state !== 'speaking') {
               bargeAboveMicRef.current = 0;
               bargeAboveMeetingRef.current = 0;
+            }
+            return;
+          }
+          if (payload.type === 'voice_meeting_window') {
+            setMeetingWindow({
+              open: payload.state === 'opened',
+              expiresAt: payload.expiresAt,
+              reason: payload.reason,
+              ts: payload.ts,
+            });
+            if (payload.state === 'opened') {
+              playerRef.current.ensure(outputSampleRateRef.current);
+              playerRef.current.playChime('listening');
             }
             return;
           }
@@ -576,6 +601,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             assistantLeakRatioRef.current = 0;
             assistantWarmupFramesRef.current = 0;
             assistantStartMsRef.current = Date.now();
+            playerRef.current.playChime('speaking');
             setLastTimings({
               turnId: payload.turnId,
               llmMs: payload.llmMs,
@@ -592,6 +618,10 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
             assistantLeakRatioRef.current = 0;
             assistantWarmupFramesRef.current = 0;
             assistantStartMsRef.current = 0;
+            if (payload.reason === 'error') {
+              playerRef.current.ensure(outputSampleRateRef.current);
+              playerRef.current.playChime('error');
+            }
             if (payload.reason && payload.reason !== 'completed') {
               playerRef.current.clear();
             }
@@ -643,20 +673,15 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
 
         if (payload.channelSplit && payload.pcmLeft && payload.pcmRight) {
           sendFrame(payload.seq * 2, payload.pcmLeft);
-          const suppressMeeting = enableMeetOutput && speakingRef.current;
-          if (!suppressMeeting) {
-            sendFrame(payload.seq * 2 + 1, payload.pcmRight);
-          }
+          sendFrame(payload.seq * 2 + 1, payload.pcmRight);
 
           const rmsMic = computeRms(payload.pcmLeft);
           noiseEmaMicRef.current = noiseEmaMicRef.current * 0.97 + rmsMic * 0.03;
           updateMicRms(rmsMic);
           maybeBargeIn('mic', rmsMic);
 
-          if (!suppressMeeting) {
-            const rmsMeeting = computeRms(payload.pcmRight);
-            noiseEmaMeetingRef.current = noiseEmaMeetingRef.current * 0.97 + rmsMeeting * 0.03;
-          }
+          const rmsMeeting = computeRms(payload.pcmRight);
+          noiseEmaMeetingRef.current = noiseEmaMeetingRef.current * 0.97 + rmsMeeting * 0.03;
           return;
         }
 
@@ -696,6 +721,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
     lastTimings,
     error,
     warning,
+    meetingWindow,
     outputSampleRate,
     micRms,
     start,

@@ -57,6 +57,10 @@ export const voiceConfigMessageSchema = z
         meetingRequireWakeWord: z.boolean().optional(),
         meetingOutputEnabled: z.boolean().optional(),
         wakeWords: z.array(z.string().min(1).max(40)).max(20).optional(),
+        meetingOpenWindowMs: z.number().int().min(0).max(30_000).optional(),
+        meetingCooldownMs: z.number().int().min(0).max(10_000).optional(),
+        echoSuppressMs: z.number().int().min(0).max(10_000).optional(),
+        echoSimilarity: z.number().min(0).max(1).optional(),
       })
       .partial()
       .optional(),

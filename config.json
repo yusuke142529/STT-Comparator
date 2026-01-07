@@ -43,6 +43,14 @@
       "closeFactor": 1.8,
       "hangoverMs": 250,
       "assistantGuardFactor": 1.5
+    },
+    "meeting": {
+      "openWindowMs": 6000,
+      "cooldownMs": 1500,
+      "echoSuppressMs": 3000,
+      "echoSimilarity": 0.8,
+      "introEnabled": true,
+      "introText": "質問は「アシスタント」と呼びかけてから続けて話してください。"
     }
   },
   "ws": {

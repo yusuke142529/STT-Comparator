@@ -64,12 +64,25 @@ const voiceMeetingGateSchema = z
   .partial()
   .default({});
 
+const voiceMeetingSchema = z
+  .object({
+    openWindowMs: z.number().int().min(0).max(30_000).optional(),
+    cooldownMs: z.number().int().min(0).max(10_000).optional(),
+    echoSuppressMs: z.number().int().min(0).max(10_000).optional(),
+    echoSimilarity: z.number().min(0).max(1).optional(),
+    introEnabled: z.boolean().optional(),
+    introText: z.string().min(1).max(500).optional(),
+  })
+  .partial()
+  .default({});
+
 const voiceSchema = z
   .object({
     presets: z.array(voicePresetSchema).min(1).max(20).optional(),
     defaultPresetId: z.string().min(1).max(50).optional(),
     vad: voiceVadSchema.optional(),
     meetingGate: voiceMeetingGateSchema.optional(),
+    meeting: voiceMeetingSchema.optional(),
   })
   .partial()
   .default({});

@@ -104,6 +104,15 @@ describe('handleVoiceConnection', () => {
       normalization: {},
       storage: { driver: 'jsonl', path: './runs' },
       providers: ['elevenlabs'],
+      voice: {
+        meeting: {
+          introEnabled: false,
+          openWindowMs: 6000,
+          cooldownMs: 1500,
+          echoSuppressMs: 3000,
+          echoSimilarity: 0.8,
+        },
+      },
       ws: { keepaliveMs: 1000, maxMissedPongs: 2 },
     }),
   }));
@@ -370,6 +379,205 @@ describe('handleVoiceConnection', () => {
     await flushMicrotasks();
 
     expect(state.generateChatReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not trigger a reply on wake word only', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: { finalizeDelayMs: 0, meetingMode: true, meetingRequireWakeWord: true },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[1]?.({ isFinal: true, text: 'アシスタント', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    expect(state.generateChatReply).toHaveBeenCalledTimes(0);
+
+    const json = parseJsonMessages(ws);
+    const meetingFinal = json.find(
+      (m) => m.type === 'voice_user_transcript' && m.isFinal === true && m.source === 'meeting' && m.text === 'アシスタント'
+    ) as { triggered?: boolean } | undefined;
+    expect(meetingFinal?.triggered).toBe(false);
+    expect(json.some((m) => m.type === 'voice_meeting_window' && m.state === 'opened')).toBe(true);
+  });
+
+  it('allows repeated wake words when open window is disabled', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: {
+            finalizeDelayMs: 0,
+            meetingMode: true,
+            meetingRequireWakeWord: true,
+            meetingOpenWindowMs: 0,
+            meetingCooldownMs: 5000,
+          },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[1]?.({ isFinal: true, text: 'アシスタント、最初の質問', provider: 'elevenlabs' });
+    handlers[1]?.({ isFinal: true, text: 'アシスタント、次の質問', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const json = parseJsonMessages(ws);
+    const first = json.find(
+      (m) =>
+        m.type === 'voice_user_transcript'
+        && m.isFinal === true
+        && m.source === 'meeting'
+        && m.text === 'アシスタント、最初の質問'
+    ) as { triggered?: boolean } | undefined;
+    const second = json.find(
+      (m) =>
+        m.type === 'voice_user_transcript'
+        && m.isFinal === true
+        && m.source === 'meeting'
+        && m.text === 'アシスタント、次の質問'
+    ) as { triggered?: boolean } | undefined;
+    expect(first?.triggered).toBe(true);
+    expect(second?.triggered).toBe(true);
+  });
+
+  it('opens a meeting window after a wake word and triggers follow-ups', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: {
+            finalizeDelayMs: 0,
+            meetingMode: true,
+            meetingRequireWakeWord: true,
+            meetingOpenWindowMs: 5000,
+          },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[1]?.({ isFinal: true, text: 'アシスタント、最初の質問', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    handlers[1]?.({ isFinal: true, text: '続きの質問', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const json = parseJsonMessages(ws);
+    const follow = json.find(
+      (m) => m.type === 'voice_user_transcript' && m.isFinal === true && m.source === 'meeting' && m.text === '続きの質問'
+    ) as { triggered?: boolean } | undefined;
+    expect(follow?.triggered).toBe(true);
+    expect(json.some((m) => m.type === 'voice_meeting_window' && m.state === 'opened')).toBe(true);
+  });
+
+  it('suppresses meeting transcripts that echo assistant output', async () => {
+    vi.useFakeTimers();
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'config',
+          pcm: true,
+          clientSampleRate: 16000,
+          channels: 2,
+          channelSplit: true,
+          options: {
+            finalizeDelayMs: 0,
+            meetingMode: true,
+            meetingRequireWakeWord: false,
+            meetingOutputEnabled: true,
+          },
+        })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    const handlers = state.getOnDataAll();
+    expect(handlers.length).toBe(2);
+
+    handlers[0]?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+    vi.advanceTimersByTime(1000);
+    await flushMicrotasks();
+
+    handlers[1]?.({ isFinal: true, text: '了解しました。', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const json = parseJsonMessages(ws);
+    const echoed = json.find(
+      (m) =>
+        m.type === 'voice_user_transcript'
+        && m.isFinal === true
+        && m.source === 'meeting'
+        && m.text === '了解しました。'
+    );
+    expect(echoed).toBeUndefined();
   });
 
   it('preserves meeting system prompt across reset_history', async () => {

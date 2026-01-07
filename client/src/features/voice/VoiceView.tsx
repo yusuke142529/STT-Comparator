@@ -492,6 +492,9 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
                     disabled={session.isRunning}
                     placeholder="アシスタント, assistant, AI"
                   />
+                  <span style={{ color: 'var(--c-text-muted)', fontSize: '0.78rem' }}>
+                    呼びかけ後の数秒は wake word なしで話せます（open window）。合図音が鳴ったら続けて話してください。
+                  </span>
                 </label>
               )}
             </div>
@@ -553,6 +556,11 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
             <div style={{ fontSize: '0.85rem', color: 'var(--c-text-muted)' }}>
               {session.sessionId ? `session: ${session.sessionId}` : 'session: -'}
             </div>
+            {session.meetingWindow?.open && (
+              <div style={{ fontSize: '0.8rem', color: 'var(--c-text-muted)' }}>
+                呼びかけウィンドウ: 開
+              </div>
+            )}
             {timingLabel && (
               <div style={{ fontSize: '0.8rem', color: 'var(--c-text-muted)' }}>
                 {timingLabel}

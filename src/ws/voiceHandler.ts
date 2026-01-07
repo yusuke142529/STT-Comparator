@@ -63,7 +63,7 @@ function stripWakeWordPrefix(text: string, wakeWords: readonly string[]): { matc
       }
     }
     const rest = trimmed.slice(token.length).replace(/^[\s,、:：-]+/, '').trim();
-    return { matched: true, cleaned: rest || trimmed };
+    return { matched: true, cleaned: rest };
   }
   return { matched: false, cleaned: trimmed };
 }
@@ -75,6 +75,52 @@ function defaultWakeWords(lang: string): string[] {
   }
   return ['assistant', 'ai'];
 }
+
+const DEFAULT_MEETING_OPEN_WINDOW_MS = 6000;
+const DEFAULT_MEETING_COOLDOWN_MS = 1500;
+const DEFAULT_MEETING_ECHO_SUPPRESS_MS = 3000;
+const DEFAULT_MEETING_ECHO_SIMILARITY = 0.8;
+const DEFAULT_MEETING_INTRO_TEXT_JA = '質問は「アシスタント」と呼びかけてから続けて話してください。';
+const DEFAULT_MEETING_INTRO_TEXT_EN = 'Please say "assistant" and then continue your question.';
+
+const clampNumber = (value: number | undefined, min: number, max: number, fallback: number): number => {
+  const safe = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, safe));
+};
+
+const clampInt = (value: number | undefined, min: number, max: number, fallback: number): number => {
+  const safe = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback;
+  return Math.min(max, Math.max(min, safe));
+};
+
+const normalizeEchoText = (text: string): string =>
+  text.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+const buildBigrams = (text: string): Set<string> => {
+  const set = new Set<string>();
+  if (!text) return set;
+  if (text.length <= 2) {
+    set.add(text);
+    return set;
+  }
+  for (let i = 0; i < text.length - 1; i += 1) {
+    set.add(text.slice(i, i + 2));
+  }
+  return set;
+};
+
+const jaccardSimilarity = (a: string, b: string): number => {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const setA = buildBigrams(a);
+  const setB = buildBigrams(b);
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let intersection = 0;
+  for (const token of setA) {
+    if (setB.has(token)) intersection += 1;
+  }
+  return intersection / (setA.size + setB.size - intersection);
+};
 
 export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   const config = await loadConfig();
@@ -115,6 +161,12 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     displayText: string;
     triggerText: string | null;
     triggered: boolean;
+  };
+  type ResolvedTranscript = {
+    info: TranscriptInfo;
+    wakeWordMatched: boolean;
+    cleanedText: string;
+    openWindowActive: boolean;
   };
   type SuppressedTranscript = { source: VoiceInputSource; info: TranscriptInfo; speakerId?: string };
   let suppressedInterim: SuppressedTranscript | null = null;
@@ -191,6 +243,90 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       reason,
     };
     sendJson(msg);
+  };
+
+  const recordAssistantText = (text: string) => {
+    const normalized = normalizeEchoText(text);
+    lastAssistantText = { text, normalized, ts: Date.now() };
+  };
+
+  const sendMeetingWindow = (
+    state: 'opened' | 'closed',
+    opts?: { expiresAt?: number; reason?: 'wake_word' | 'timeout' | 'manual' | 'cooldown' }
+  ) => {
+    sendJson({
+      type: 'voice_meeting_window',
+      state,
+      ts: Date.now(),
+      expiresAt: opts?.expiresAt,
+      reason: opts?.reason,
+    });
+  };
+
+  const closeMeetingWindow = (now: number, reason: 'timeout' | 'manual' | 'cooldown' = 'timeout') => {
+    if (!meetingWindowOpen) return;
+    meetingWindowOpen = false;
+    meetingOpenUntil = 0;
+    if (meetingCooldownMs > 0) {
+      meetingCooldownUntil = now + meetingCooldownMs;
+    }
+    sendMeetingWindow('closed', { reason });
+    logger.info({ event: 'voice_meeting_window_closed', sessionId, reason });
+  };
+
+  const openMeetingWindow = (now: number, reason: 'wake_word' | 'manual' = 'wake_word') => {
+    const canOpen = meetingOpenWindowMs > 0;
+    if (!canOpen) return;
+    const wasOpen = meetingOpenUntil > now;
+    if (meetingCooldownMs > 0) {
+      meetingCooldownUntil = now + meetingCooldownMs;
+    }
+    meetingOpenUntil = now + meetingOpenWindowMs;
+    if (!wasOpen) {
+      meetingWindowOpen = true;
+      sendMeetingWindow('opened', { expiresAt: meetingOpenUntil, reason });
+      logger.info({ event: 'voice_meeting_window_opened', sessionId, expiresAt: meetingOpenUntil, reason });
+    }
+  };
+
+  const refreshMeetingWindow = (now: number) => {
+    if (meetingOpenUntil > 0 && now >= meetingOpenUntil) {
+      closeMeetingWindow(now, 'timeout');
+    }
+  };
+
+  const extendMeetingWindow = (now: number) => {
+    if (meetingOpenWindowMs <= 0) return;
+    if (meetingOpenUntil > now) {
+      meetingOpenUntil = Math.max(meetingOpenUntil, now + meetingOpenWindowMs);
+    }
+  };
+
+  const isEchoLikely = (text: string, altText?: string, now = Date.now()) => {
+    if (!meetingModeEnabled || !meetingOutputEnabled) return false;
+    if (meetingEchoSuppressMs <= 0 || meetingEchoSimilarity <= 0) return false;
+    const last = lastAssistantText;
+    if (!last?.normalized) return false;
+    if (now - last.ts > meetingEchoSuppressMs) return false;
+    const normalized = normalizeEchoText(text);
+    const altNormalized = altText ? normalizeEchoText(altText) : '';
+    const base = last.normalized;
+    const candidates = [normalized];
+    if (altNormalized && altNormalized !== normalized) {
+      candidates.push(altNormalized);
+    }
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      if (candidate.length < 4 || base.length < 4) {
+        if (candidate === base) return true;
+        continue;
+      }
+      const similarity = jaccardSimilarity(candidate, base);
+      if (similarity >= meetingEchoSimilarity) {
+        return true;
+      }
+    }
+    return false;
   };
 
   const sendUserTranscript = (
@@ -347,6 +483,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
         timestamp: Date.now(),
       };
       sendJson(textMsg);
+      recordAssistantText(assistantText);
 
       const ttsStart = Date.now();
       let ttsTtfbMs: number | null = null;
@@ -409,6 +546,104 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       }
       const message = err instanceof Error ? err.message : 'voice agent error';
       logger.error({ event: 'voice_agent_error', message });
+      if (assistantTurn?.state === 'speaking') {
+        sendAudioEnd(turnId, 'error');
+      }
+      sendJson({ type: 'error', message });
+    } finally {
+      if (isActiveTurn()) {
+        assistantTurn = null;
+        clearSuppressedTranscripts();
+        if (!closed) {
+          sendState('listening');
+        }
+      }
+    }
+  };
+
+  const speakAssistantText = async (assistantText: string) => {
+    if (closed) return;
+    if (assistantTurn) return;
+    if (!ttsProvider) return;
+    const trimmed = assistantText.trim();
+    if (!trimmed) return;
+
+    const abort = new AbortController();
+    const turnId = randomUUID();
+    assistantTurn = { turnId, abort, state: 'thinking' };
+    sendState('thinking', turnId);
+    const isActiveTurn = () => assistantTurn?.turnId === turnId;
+
+    const textMsg: VoiceAssistantTextMessage = {
+      type: 'voice_assistant_text',
+      turnId,
+      text: trimmed,
+      isFinal: true,
+      timestamp: Date.now(),
+    };
+    sendJson(textMsg);
+    recordAssistantText(trimmed);
+
+    const ttsStart = Date.now();
+    let ttsTtfbMs: number | null = null;
+    let audioChunks = 0;
+    let audioBytes = 0;
+    let startedSpeaking = false;
+
+    try {
+      const ttsStream =
+        ttsProvider === 'openai'
+          ? streamOpenAiTtsPcm(trimmed, { signal: abort.signal, sampleRate: outputSampleRate })
+          : streamTtsPcm(trimmed, { signal: abort.signal, lang, sampleRate: outputSampleRate });
+
+      for await (const pcm of ttsStream) {
+        if (abort.signal.aborted || closed) break;
+        if (!isActiveTurn()) break;
+        if (!startedSpeaking) {
+          startedSpeaking = true;
+          ttsTtfbMs = Date.now() - ttsStart;
+          clearSuppressedTranscripts();
+          assistantTurn = { turnId, abort, state: 'speaking' };
+          sendState('speaking', turnId);
+          sendAudioStart(turnId, { ttsTtfbMs });
+        }
+        try {
+          ws.send(pcm);
+          audioChunks += 1;
+          audioBytes += pcm.length;
+        } catch {
+          break;
+        }
+      }
+
+      if (!abort.signal.aborted && !closed && isActiveTurn() && startedSpeaking) {
+        sendAudioEnd(turnId, 'completed');
+      }
+
+      if (!abort.signal.aborted && !closed && isActiveTurn()) {
+        logger.info({
+          event: 'voice_intro_metrics',
+          sessionId,
+          turnId,
+          presetId: presetId ?? undefined,
+          ttsProvider: ttsProvider ?? undefined,
+          lang,
+          ttsTtfbMs,
+          ttsMs: Date.now() - ttsStart,
+          audioChunks,
+          audioBytes,
+          outputSampleRate,
+        });
+      }
+    } catch (err) {
+      if (abort.signal.aborted || closed) {
+        return;
+      }
+      if (!isActiveTurn()) {
+        return;
+      }
+      const message = err instanceof Error ? err.message : 'voice agent error';
+      logger.error({ event: 'voice_intro_error', message });
       if (assistantTurn?.state === 'speaking') {
         sendAudioEnd(turnId, 'error');
       }
@@ -495,15 +730,23 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   let meetingRequireWakeWord = false;
   let meetingOutputEnabled = false;
   let wakeWords: string[] = [];
+  let meetingOpenUntil = 0;
+  let meetingCooldownUntil = 0;
+  let meetingOpenWindowMs = DEFAULT_MEETING_OPEN_WINDOW_MS;
+  let meetingCooldownMs = DEFAULT_MEETING_COOLDOWN_MS;
+  let meetingEchoSuppressMs = DEFAULT_MEETING_ECHO_SUPPRESS_MS;
+  let meetingEchoSimilarity = DEFAULT_MEETING_ECHO_SIMILARITY;
+  let meetingIntroEnabled = true;
+  let meetingIntroText: string | null = null;
+  let meetingWindowOpen = false;
+  let meetingIntroSent = false;
+  let lastAssistantText: { text: string; normalized: string; ts: number } | null = null;
 
   async function handlePcmChunk(
     source: VoiceInputSource,
     pcm: Buffer,
     meta?: { captureTs?: number; durationMs?: number }
   ) {
-    if (source === 'meeting' && meetingModeEnabled && meetingOutputEnabled && voiceState === 'speaking') {
-      return;
-    }
     if (source === 'meeting' && meetingModeEnabled && meetingGate.config.enabled) {
       const decision = meetingGate.shouldForward(pcm, {
         captureTs: meta?.captureTs,
@@ -511,12 +754,6 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
         assistantSpeaking: meetingOutputEnabled && voiceState === 'speaking',
         sampleRateHz: outputSampleRate,
       });
-      if (!meetingRequireWakeWord && decision.speechDetected) {
-        if (voiceState === 'speaking' || assistantTurn?.state === 'thinking') {
-          stopAssistant('barge_in');
-          applySuppressedTranscripts();
-        }
-      }
       if (!decision.allow) return;
     }
     await sendAudioToBackend(source, pcm);
@@ -541,19 +778,47 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     return text.replace(/(^|\n)\s*\[(meeting|me)\]\s*/gi, '$1').trim();
   };
 
-  const buildTranscriptInfo = (source: VoiceInputSource, text: string): TranscriptInfo | null => {
+  const buildTranscriptInfo = (source: VoiceInputSource, text: string, now: number): ResolvedTranscript | null => {
     const displayText = text.trim();
     if (!displayText) return null;
     if (source !== 'meeting' || !meetingRequireWakeWord) {
-      return { displayText, triggerText: displayText, triggered: true };
+      return {
+        info: { displayText, triggerText: displayText, triggered: true },
+        wakeWordMatched: false,
+        cleanedText: displayText,
+        openWindowActive: false,
+      };
     }
     const stripped = stripWakeWordPrefix(displayText, wakeWords);
-    if (!stripped.matched) {
-      return { displayText, triggerText: null, triggered: false };
-    }
     const cleaned = stripped.cleaned.trim();
-    const triggerText = cleaned || displayText;
-    return { displayText, triggerText, triggered: true };
+    const cleanedText = cleaned;
+    const cooldownBlocked = meetingOpenWindowMs > 0 && now < meetingCooldownUntil;
+    const wakeWordMatched = stripped.matched && !cooldownBlocked;
+    const openWindowAllowed = meetingOpenWindowMs > 0;
+    const openWindowActive = meetingOpenUntil > now || (openWindowAllowed && wakeWordMatched);
+    if (wakeWordMatched) {
+      const hasContent = /[\p{L}\p{N}]/u.test(cleanedText);
+      return {
+        info: { displayText, triggerText: hasContent ? cleanedText : null, triggered: hasContent },
+        wakeWordMatched: true,
+        cleanedText,
+        openWindowActive,
+      };
+    }
+    if (openWindowActive) {
+      return {
+        info: { displayText, triggerText: displayText, triggered: true },
+        wakeWordMatched: false,
+        cleanedText: displayText,
+        openWindowActive,
+      };
+    }
+    return {
+      info: { displayText, triggerText: null, triggered: false },
+      wakeWordMatched: false,
+      cleanedText: displayText,
+      openWindowActive: false,
+    };
   };
 
   const enqueueFinalPart = (text: string) => {
@@ -714,6 +979,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
               timestamp: Date.now(),
             };
             sendJson(textMsg);
+            recordAssistantText(sanitized);
           }
           active.assistantTextDone = true;
           if (active.audioDone) {
@@ -758,6 +1024,40 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       wakeWords = defaultWakeWords(lang);
     }
     meetingRequireWakeWord = msg.options?.meetingRequireWakeWord ?? meetingModeEnabled;
+    const meetingConfig = config.voice?.meeting;
+    meetingOpenWindowMs = clampInt(
+      msg.options?.meetingOpenWindowMs ?? meetingConfig?.openWindowMs,
+      0,
+      30_000,
+      DEFAULT_MEETING_OPEN_WINDOW_MS
+    );
+    meetingCooldownMs = clampInt(
+      msg.options?.meetingCooldownMs ?? meetingConfig?.cooldownMs,
+      0,
+      10_000,
+      DEFAULT_MEETING_COOLDOWN_MS
+    );
+    meetingEchoSuppressMs = clampInt(
+      msg.options?.echoSuppressMs ?? meetingConfig?.echoSuppressMs,
+      0,
+      10_000,
+      DEFAULT_MEETING_ECHO_SUPPRESS_MS
+    );
+    meetingEchoSimilarity = clampNumber(
+      msg.options?.echoSimilarity ?? meetingConfig?.echoSimilarity,
+      0,
+      1,
+      DEFAULT_MEETING_ECHO_SIMILARITY
+    );
+    meetingIntroEnabled = meetingConfig?.introEnabled ?? true;
+    meetingIntroText =
+      meetingConfig?.introText ??
+      (lang.toLowerCase().startsWith('ja') ? DEFAULT_MEETING_INTRO_TEXT_JA : DEFAULT_MEETING_INTRO_TEXT_EN);
+    meetingOpenUntil = 0;
+    meetingCooldownUntil = 0;
+    meetingWindowOpen = false;
+    meetingIntroSent = false;
+    lastAssistantText = null;
     applyMeetingSystemPrompt();
 
     if (presetMode === 'openai_realtime') {
@@ -813,8 +1113,34 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
 
     const handleSttTranscript = (source: VoiceInputSource, t: { isFinal: boolean; text: string; speakerId?: string }) => {
       if (closed) return;
-      const info = buildTranscriptInfo(source, t.text);
-      if (!info) return;
+      const now = Date.now();
+      if (source === 'meeting' && meetingModeEnabled) {
+        refreshMeetingWindow(now);
+      }
+
+      const resolved = buildTranscriptInfo(source, t.text, now);
+      if (!resolved) return;
+      const { info, wakeWordMatched, cleanedText, openWindowActive } = resolved;
+
+      if (source === 'meeting' && meetingModeEnabled) {
+        if (isEchoLikely(info.displayText, cleanedText, now)) {
+          logger.info({
+            event: 'voice_echo_suppressed',
+            sessionId,
+            wakeWordMatched,
+            openWindowActive,
+          });
+          return;
+        }
+
+        if (meetingRequireWakeWord) {
+          if (wakeWordMatched) {
+            openMeetingWindow(now, 'wake_word');
+          } else if (openWindowActive && info.triggerText) {
+            extendMeetingWindow(now);
+          }
+        }
+      }
 
       // If the user starts talking while the assistant is still thinking, abort the in-flight turn.
       if (assistantTurn?.state === 'thinking' && info.triggerText) {
@@ -826,6 +1152,10 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
           suppressedFinalParts.push({ source, info, speakerId: t.speakerId });
         } else {
           suppressedInterim = { source, info, speakerId: t.speakerId };
+        }
+        if (source === 'meeting' && info.triggerText) {
+          stopAssistant('barge_in');
+          applySuppressedTranscripts();
         }
         return;
       }
@@ -882,12 +1212,21 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       missedPongs += 1;
       sendJson({ type: 'ping', ts: Date.now() });
     }, keepaliveMs);
+
+    if (meetingModeEnabled && meetingIntroEnabled && !meetingIntroSent) {
+      const intro = meetingIntroText?.trim();
+      if (intro) {
+        meetingIntroSent = true;
+        void speakAssistantText(intro);
+      }
+    }
   };
 
   const handleCommand = async (msg: VoiceCommandMessage) => {
     if (msg.name === 'reset_history') {
       const hadAssistant = assistantTurn !== null || realtimeActive !== null;
       stopAssistant('stopped', { playedMs: msg.playedMs });
+      closeMeetingWindow(Date.now(), 'manual');
       history.length = 0;
       history.push({ role: 'system', content: systemPrompt });
       applyMeetingSystemPrompt();

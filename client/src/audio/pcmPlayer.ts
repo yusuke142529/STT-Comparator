@@ -211,6 +211,38 @@ export class PcmPlayer {
     this.micMeetGain.gain.value = muted ? 0 : 1;
   }
 
+  playChime(kind: 'listening' | 'speaking' | 'error') {
+    if (!this.ctx || !this.monitorGain || !this.meetGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const baseVolume = kind === 'error' ? 0.08 : 0.06;
+    const pattern =
+      kind === 'error'
+        ? [
+            { freq: 440, duration: 0.06, gap: 0.04 },
+            { freq: 330, duration: 0.08, gap: 0 },
+          ]
+        : kind === 'speaking'
+          ? [{ freq: 660, duration: 0.08, gap: 0 }]
+          : [{ freq: 880, duration: 0.07, gap: 0 }];
+
+    let start = now;
+    for (const tone of pattern) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(tone.freq, start);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(baseVolume, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + tone.duration);
+      osc.connect(gain);
+      gain.connect(this.monitorGain);
+      osc.start(start);
+      osc.stop(start + tone.duration + 0.02);
+      start += tone.duration + (tone.gap ?? 0);
+    }
+  }
+
   enqueuePcm(buffer: ArrayBuffer) {
     if (!this.ctx || !this.monitorGain || !this.meetGain) return;
     const ctx = this.ctx;

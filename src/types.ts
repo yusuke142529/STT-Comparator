@@ -246,6 +246,14 @@ export interface VoiceConfigMessage {
     meetingOutputEnabled?: boolean;
     /** Wake words used when meetingRequireWakeWord is enabled. */
     wakeWords?: readonly string[];
+    /** Open-window duration (ms) after a wake word. */
+    meetingOpenWindowMs?: number;
+    /** Cooldown between open-window activations (ms). */
+    meetingCooldownMs?: number;
+    /** Echo suppression window after assistant speech (ms). */
+    echoSuppressMs?: number;
+    /** Similarity threshold for echo suppression (0..1). */
+    echoSimilarity?: number;
   };
 }
 
@@ -313,6 +321,14 @@ export interface VoiceAssistantAudioEndMessage {
   reason?: 'completed' | 'barge_in' | 'stopped' | 'error';
 }
 
+export interface VoiceMeetingWindowMessage {
+  type: 'voice_meeting_window';
+  state: 'opened' | 'closed';
+  ts: number;
+  expiresAt?: number;
+  reason?: 'wake_word' | 'timeout' | 'manual' | 'cooldown';
+}
+
 export type VoiceServerMessage =
   | VoiceSessionMessage
   | VoiceStateMessage
@@ -320,6 +336,7 @@ export type VoiceServerMessage =
   | VoiceAssistantTextMessage
   | VoiceAssistantAudioStartMessage
   | VoiceAssistantAudioEndMessage
+  | VoiceMeetingWindowMessage
   | StreamErrorMessage;
 
 export interface NormalizationConfig {

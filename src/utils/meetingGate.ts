@@ -79,9 +79,9 @@ const VAD_PRESETS: Array<Pick<
   'snrThreshold' | 'zcrMin' | 'zcrMax' | 'minSpeechFrames' | 'speechRatio' | 'toneStdRatio'
 >> = [
   { snrThreshold: 2.0, zcrMin: 0.005, zcrMax: 0.5, minSpeechFrames: 1, speechRatio: 0.2, toneStdRatio: 0.08 },
-  { snrThreshold: 2.5, zcrMin: 0.01, zcrMax: 0.45, minSpeechFrames: 2, speechRatio: 0.3, toneStdRatio: 0.1 },
-  { snrThreshold: 3.0, zcrMin: 0.015, zcrMax: 0.4, minSpeechFrames: 2, speechRatio: 0.4, toneStdRatio: 0.12 },
-  { snrThreshold: 3.5, zcrMin: 0.02, zcrMax: 0.35, minSpeechFrames: 3, speechRatio: 0.5, toneStdRatio: 0.14 },
+  { snrThreshold: 2.5, zcrMin: 0.01, zcrMax: 0.45, minSpeechFrames: 2, speechRatio: 0.3, toneStdRatio: 0.13 },
+  { snrThreshold: 3.0, zcrMin: 0.015, zcrMax: 0.4, minSpeechFrames: 2, speechRatio: 0.4, toneStdRatio: 0.15 },
+  { snrThreshold: 3.5, zcrMin: 0.02, zcrMax: 0.35, minSpeechFrames: 3, speechRatio: 0.5, toneStdRatio: 0.17 },
 ];
 
 const DEFAULT_CONFIG: ResolvedMeetingGateConfig = {
