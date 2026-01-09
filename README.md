@@ -71,6 +71,8 @@ UI の「音声会話」タブは、マイク入力 → STT → LLM → TTS → 
 - 参考: `voice_assistant_audio_start` に `llmMs` / `ttsTtfbMs` が含まれ、UI に表示されます（体感遅延の内訳確認に利用）。
 - 日本語品質: `lang` が `ja-*` で `ELEVENLABS_TTS_MODEL_ID` 未設定の場合は `eleven_multilingual_v2` を自動適用（アカウント/モデル非対応時は自動で無指定にフォールバック）。
 - 速度調整: `ELEVENLABS_TTS_OPTIMIZE_STREAMING_LATENCY`（例: `3`）で ElevenLabs の初動レイテンシをチューニングできます。
+  - OpenAI LLM（pipeline）: Responses API を使用。`OPENAI_RESPONSES_MODEL`（既定 `gpt-5.2`）でモデル選択、`OPENAI_WEB_SEARCH_ENABLED` を有効にすると最新情報検索 + 引用表示が可能です。
+  - Web検索制御: `OPENAI_WEB_SEARCH_ALLOWED_DOMAINS`（許可ドメイン）、`OPENAI_WEB_SEARCH_CONTEXT_SIZE`（検索文脈サイズ）、`OPENAI_WEB_SEARCH_EXTERNAL_ACCESS`（外部アクセス許可）
   - OpenAI TTS: `OPENAI_TTS_MODEL`（既定 `gpt-4o-mini-tts`）, `OPENAI_TTS_VOICE`（既定 `alloy`）
 
 #### Meet モード（Web会議の参加者とも会話する）

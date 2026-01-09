@@ -24,7 +24,7 @@ import type {
   VoiceStateMessage,
   VoiceUserTranscriptMessage,
 } from '../types.js';
-import { generateChatReply } from '../voice/openaiChat.js';
+import { generateChatReply } from '../voice/openaiResponses.js';
 import { streamTtsPcm } from '../voice/elevenlabsTts.js';
 import { streamOpenAiTtsPcm } from '../voice/openaiTts.js';
 import { resolveVoicePreset } from '../voice/voicePresets.js';
@@ -143,7 +143,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   let missedPongs = 0;
   let sessionStarted = false;
   let voiceState: VoiceState = 'listening';
-  let finalizeDelayMs = 350;
+  let finalizeDelayMs = 200;
 
   const systemPrompt = getSystemPrompt();
   const historyMaxTurns = getHistoryMaxTurns();
@@ -457,10 +457,29 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
 
     try {
       const llmStart = Date.now();
-      const rawAssistantText = await generateChatReply(history, {
+      const reply = await generateChatReply(history, {
         signal: abort.signal,
+        instructions: history[0]?.content,
       });
-      const assistantText = sanitizeAssistantText(rawAssistantText);
+      const rawAssistantText = reply.text;
+      const leadingWhitespace = rawAssistantText.match(/^\s+/)?.[0].length ?? 0;
+      const trimmed = rawAssistantText.trim();
+      let citations = reply.citations;
+      if (leadingWhitespace > 0 || trimmed.length !== rawAssistantText.length) {
+        const trimmedLength = trimmed.length;
+        citations = citations
+          .map((citation) => ({
+            ...citation,
+            startIndex: citation.startIndex - leadingWhitespace,
+            endIndex: citation.endIndex - leadingWhitespace,
+          }))
+          .filter((citation) => citation.startIndex >= 0 && citation.endIndex <= trimmedLength);
+      }
+
+      const assistantText = sanitizeAssistantText(trimmed);
+      if (assistantText !== trimmed && citations.length > 0) {
+        citations = [];
+      }
       const llmMs = Date.now() - llmStart;
 
       if (abort.signal.aborted || closed) {
@@ -479,6 +498,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
         type: 'voice_assistant_text',
         turnId,
         text: assistantText,
+        citations: citations.length > 0 ? citations : undefined,
         isFinal: true,
         timestamp: Date.now(),
       };

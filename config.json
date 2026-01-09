@@ -35,6 +35,9 @@
     "refreshMs": 5000
   },
   "voice": {
+    "vad": {
+      "silenceDurationMs": 250
+    },
     "meetingGate": {
       "enabled": true,
       "minRms": 0.01,

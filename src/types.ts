@@ -298,10 +298,18 @@ export interface VoiceUserTranscriptMessage {
   triggered?: boolean;
 }
 
+export type UrlCitation = {
+  url: string;
+  title?: string;
+  startIndex: number;
+  endIndex: number;
+};
+
 export interface VoiceAssistantTextMessage {
   type: 'voice_assistant_text';
   turnId: string;
   text: string;
+  citations?: UrlCitation[];
   isFinal: boolean;
   timestamp: number;
 }

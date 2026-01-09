@@ -1,5 +1,5 @@
 import type { ProviderId, VoiceAgentMode } from '../types.js';
-import { getOpenAiChatUrl } from './openaiChat.js';
+import { getOpenAiResponsesUrl } from './openaiResponses.js';
 
 export type VoiceProviders = {
   stt: ProviderId;
@@ -64,9 +64,9 @@ export function getVoiceMissingEnv(providers: VoiceProviders, mode?: VoiceAgentM
   if (!process.env.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
   if (mode !== 'openai_realtime') {
     try {
-      getOpenAiChatUrl();
+      getOpenAiResponsesUrl();
     } catch {
-      missing.push('OPENAI_CHAT_URL');
+      missing.push('OPENAI_RESPONSES_URL');
     }
   }
 

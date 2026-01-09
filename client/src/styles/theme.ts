@@ -625,6 +625,39 @@ select:focus, input:focus, textarea:focus {
   opacity: 0.75;
 }
 
+.voice-citation-sup {
+  margin-left: 0.15rem;
+  font-size: 0.75em;
+}
+
+.voice-citation-sup a {
+  color: var(--c-primary);
+  text-decoration: none;
+}
+
+.voice-citation-sup a:hover {
+  text-decoration: underline;
+}
+
+.voice-citations {
+  margin-top: 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--c-text-muted);
+}
+
+.voice-citation-link {
+  color: var(--c-primary);
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.voice-citation-link:hover {
+  text-decoration: underline;
+}
+
 /* Source Selection Pills */
 .source-toggle {
   display: grid;

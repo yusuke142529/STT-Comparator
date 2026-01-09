@@ -330,7 +330,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 
 ## 14. UI仕様（要点）
 - Realtime: プロバイダ選択（現行は Deepgram、ElevenLabs、OpenAI、Whisper Streaming。local_whisper は Batch のみ対応）、言語、VAD・句読点ポリシー・辞書トグル、Start/Stop、部分/確定表示、レイテンシ表示、Chrome/Edge 推奨文言。入力ソースはマイクと「内部ファイル再生」のトグルになっており、ファイル選択時は `/api/realtime/replay` で音声をサーバに送り、返却された `sessionId` を使って `/ws/replay` を開くことで mic-less の比較が可能です。
-- Voice: 音声会話（STT/LLM/TTS）を UI から開始/停止、プリセット切替、barge-in 対応。Meet モード用のルーティングとモニタ再生を提供。
+- Voice: 音声会話（STT/LLM/TTS）を UI から開始/停止、プリセット切替、barge-in 対応。Meet モード用のルーティングとモニタ再生を提供。LLM は Responses API を使用し、Web検索を有効化すると引用リンクを表示。
 - Batch Evaluate: ファイルドロップ、参照マニフェスト、並列度（options.parallel）、VAD/句読点/辞書入力、Run、進捗バー、結果テーブル、CSV/JSON DL。
 - Results: 最新ジョブの p50/p95 要約と per-file テーブル（provider/cer/wer/rtf/latency）、簡易チャート（p50/p95）を表示。高度な比較グラフは拡張範囲。
 - 操作: マイク許可必須、ストリーミング中は Stop 常設、プロバイダ切替時はセッションを安全終了。

@@ -18,7 +18,7 @@ describe('handleVoiceConnection', () => {
   const state = vi.hoisted(() => {
     let onDataHandler: ((t: any) => void) | null = null;
     let onDataHandlers: Array<(t: any) => void> = [];
-    let chatQueue: Array<() => Promise<string>> = [];
+    let chatQueue: Array<() => Promise<{ text: string; citations: any[] }>> = [];
     const chatSignals: AbortSignal[] = [];
     const chatSnapshots: unknown[] = [];
     const controller = {
@@ -35,7 +35,7 @@ describe('handleVoiceConnection', () => {
       if (opts?.signal) chatSignals.push(opts.signal);
       const next = chatQueue.shift();
       if (next) return await next();
-      return '了解しました。';
+      return { text: '了解しました。', citations: [] };
     });
     return {
       controller,
@@ -45,7 +45,7 @@ describe('handleVoiceConnection', () => {
       },
       getOnData: () => onDataHandler,
       getOnDataAll: () => onDataHandlers.slice(),
-      setChatQueue: (queue: Array<() => Promise<string>>) => {
+      setChatQueue: (queue: Array<() => Promise<{ text: string; citations: any[] }>>) => {
         chatQueue = [...queue];
       },
       getChatSignals: () => chatSignals.slice(),
@@ -132,9 +132,9 @@ describe('handleVoiceConnection', () => {
     })),
   }));
 
-  vi.mock('../voice/openaiChat.js', () => ({
+  vi.mock('../voice/openaiResponses.js', () => ({
     generateChatReply: state.generateChatReply,
-    getOpenAiChatUrl: () => 'https://api.openai.com/v1/chat/completions',
+    getOpenAiResponsesUrl: () => 'https://api.openai.com/v1/responses',
   }));
 
   vi.mock('../voice/openaiRealtimeVoice.js', () => ({
@@ -711,10 +711,10 @@ describe('handleVoiceConnection', () => {
     const ws = new FakeWebSocket();
 
     let rejectFirst: ((err: Error) => void) | null = null;
-    const firstChat = new Promise<string>((_resolve, reject) => {
+    const firstChat = new Promise<{ text: string; citations: any[] }>((_resolve, reject) => {
       rejectFirst = reject;
     });
-    state.setChatQueue([() => firstChat, async () => '次の返答です。']);
+    state.setChatQueue([() => firstChat, async () => ({ text: '次の返答です。', citations: [] })]);
 
     await handleVoiceConnection(ws as any, 'ja-JP');
     ws.emit(

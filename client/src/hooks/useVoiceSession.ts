@@ -8,6 +8,7 @@ import type {
   VoiceInputSource,
   VoiceServerMessage,
   VoiceState,
+  UrlCitation,
 } from '../types/voice';
 
 type ChatItem = {
@@ -19,6 +20,7 @@ type ChatItem = {
   source?: VoiceInputSource;
   speakerId?: string;
   triggered?: boolean;
+  citations?: UrlCitation[];
 };
 
 type VoiceTimings = {
@@ -589,6 +591,7 @@ export function useVoiceSession(options: { apiBase: string; lang: string }) {
                 text: payload.text,
                 ts: payload.timestamp,
                 turnId: payload.turnId,
+                citations: payload.citations,
               },
             ]);
             return;

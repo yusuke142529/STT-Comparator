@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { fetchJson } from '../../utils/fetchJson';
 import { computeVoiceRouting } from '../../utils/audioRouting';
 import { useVoiceSession } from '../../hooks/useVoiceSession';
 import { useAudioInputDevices } from '../../hooks/useAudioInputDevices';
 import { useAudioOutputDevices } from '../../hooks/useAudioOutputDevices';
 import { useMicrophonePermission } from '../../hooks/useMicrophonePermission';
+import type { UrlCitation } from '../../types/voice';
 
 type VoicePresetAvailability = {
   id: string;
@@ -54,6 +56,102 @@ function saveBool(key: string, value: boolean) {
 function loadString(key: string, fallback: string) {
   if (typeof window === 'undefined') return fallback;
   return window.localStorage.getItem(key) ?? fallback;
+}
+
+type IndexedCitation = UrlCitation & { index: number };
+
+function normalizeCitations(text: string, citations?: UrlCitation[]) {
+  if (!citations || citations.length === 0) {
+    return { inline: [] as IndexedCitation[], list: [] as IndexedCitation[] };
+  }
+
+  const valid = citations
+    .filter((c) => Number.isFinite(c.startIndex) && Number.isFinite(c.endIndex))
+    .map((c) => ({
+      ...c,
+      startIndex: Math.max(0, Math.min(text.length, Math.floor(c.startIndex))),
+      endIndex: Math.max(0, Math.min(text.length, Math.floor(c.endIndex))),
+    }))
+    .filter((c) => c.endIndex > c.startIndex);
+
+  if (valid.length === 0) {
+    return { inline: [] as IndexedCitation[], list: [] as IndexedCitation[] };
+  }
+
+  valid.sort((a, b) => a.endIndex - b.endIndex || a.startIndex - b.startIndex);
+  const list: IndexedCitation[] = [];
+  const inline: IndexedCitation[] = [];
+  const seen = new Map<string, number>();
+
+  for (const citation of valid) {
+    const key = `${citation.url}|${citation.title ?? ''}`;
+    let index = seen.get(key);
+    if (!index) {
+      index = list.length + 1;
+      seen.set(key, index);
+      list.push({ ...citation, index });
+    }
+    inline.push({ ...citation, index });
+  }
+
+  return { inline, list };
+}
+
+function renderTextWithCitations(text: string, citations?: UrlCitation[]): ReactNode {
+  const { inline } = normalizeCitations(text, citations);
+  if (inline.length === 0) return text;
+
+  const grouped = new Map<number, IndexedCitation[]>();
+  for (const citation of inline) {
+    const end = citation.endIndex;
+    const bucket = grouped.get(end) ?? [];
+    bucket.push(citation);
+    grouped.set(end, bucket);
+  }
+  const ends = Array.from(grouped.keys()).sort((a, b) => a - b);
+
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const end of ends) {
+    if (end > cursor) {
+      nodes.push(text.slice(cursor, end));
+    }
+    const bucket = grouped.get(end) ?? [];
+    for (const citation of bucket) {
+      nodes.push(
+        <sup key={`${end}-${citation.index}-${citation.url}`} className="voice-citation-sup">
+          <a href={citation.url} target="_blank" rel="noreferrer">
+            {citation.index}
+          </a>
+        </sup>
+      );
+    }
+    cursor = Math.max(cursor, end);
+  }
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+  return nodes;
+}
+
+function renderCitationList(text: string, citations?: UrlCitation[]): ReactNode | null {
+  const { list } = normalizeCitations(text, citations);
+  if (list.length === 0) return null;
+  return (
+    <div className="voice-citations">
+      {list.map((citation) => (
+        <a
+          key={`${citation.index}-${citation.url}`}
+          href={citation.url}
+          target="_blank"
+          rel="noreferrer"
+          className="voice-citation-link"
+        >
+          [{citation.index}] {citation.title ?? citation.url}
+        </a>
+      ))}
+    </div>
+  );
 }
 
 export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) {
@@ -601,6 +699,11 @@ export function VoiceView({ apiBase, lang }: { apiBase: string; lang: string }) 
                   </span>
                   {item.text}
                 </span>
+              ) : item.role === 'assistant' ? (
+                <>
+                  <span>{renderTextWithCitations(item.text, item.citations)}</span>
+                  {renderCitationList(item.text, item.citations)}
+                </>
               ) : (
                 item.text
               )}
