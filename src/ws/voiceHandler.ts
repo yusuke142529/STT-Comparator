@@ -164,6 +164,7 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   const startedAt = new Date().toISOString();
   const keepaliveMs = config.ws?.keepaliveMs ?? 30_000;
   const maxMissedPongs = config.ws?.maxMissedPongs ?? 2;
+  const shouldKeepalive = keepaliveMs > 0 && maxMissedPongs > 0;
   let outputSampleRate = config.audio.targetSampleRate ?? 16_000;
   const openAiRealtimeSampleRate = 24_000;
   let presetId: string | null = null;
@@ -1157,15 +1158,17 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
       sendJson(sessionMsg);
       sendState('listening');
 
-      keepaliveTimer = setInterval(() => {
-        if (closed) return;
-        if (missedPongs >= maxMissedPongs) {
-          handleFatal(new Error('voice keepalive timeout'));
-          return;
-        }
-        missedPongs += 1;
-        sendJson({ type: 'ping', ts: Date.now() });
-      }, keepaliveMs);
+      if (shouldKeepalive) {
+        keepaliveTimer = setInterval(() => {
+          if (closed) return;
+          if (missedPongs >= maxMissedPongs) {
+            handleFatal(new Error('voice keepalive timeout'));
+            return;
+          }
+          missedPongs += 1;
+          sendJson({ type: 'ping', ts: Date.now() });
+        }, keepaliveMs);
+      }
 
       return;
     }
@@ -1274,15 +1277,17 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     sendJson(sessionMsg);
     sendState('listening');
 
-    keepaliveTimer = setInterval(() => {
-      if (closed) return;
-      if (missedPongs >= maxMissedPongs) {
-        handleFatal(new Error('voice keepalive timeout'));
-        return;
-      }
-      missedPongs += 1;
-      sendJson({ type: 'ping', ts: Date.now() });
-    }, keepaliveMs);
+    if (shouldKeepalive) {
+      keepaliveTimer = setInterval(() => {
+        if (closed) return;
+        if (missedPongs >= maxMissedPongs) {
+          handleFatal(new Error('voice keepalive timeout'));
+          return;
+        }
+        missedPongs += 1;
+        sendJson({ type: 'ping', ts: Date.now() });
+      }, keepaliveMs);
+    }
 
     if (meetingModeEnabled && meetingIntroEnabled && !meetingIntroSent) {
       const intro = meetingIntroText?.trim();

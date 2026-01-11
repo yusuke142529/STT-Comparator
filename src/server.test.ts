@@ -1,5 +1,4 @@
-import express from 'express';
-import request from 'supertest';
+import type { Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { createRealtimeLatencyHandler } from './server.js';
 import type { RealtimeLatencySummary, StorageDriver } from './types.js';
@@ -19,6 +18,30 @@ const sampleSummary = (overrides: Partial<RealtimeLatencySummary> = {}): Realtim
   ...overrides,
 });
 
+const makeJsonResponder = () => {
+  const res = {
+    statusCode: 200,
+    body: undefined as unknown,
+    json(this: { statusCode: number; body: unknown }, payload: unknown) {
+      this.body = payload;
+      return this;
+    },
+    status(this: { statusCode: number }, code: number) {
+      this.statusCode = code;
+      return this;
+    },
+  };
+  return res as Response & { body: unknown; statusCode: number };
+};
+
+const callLatencyHandler = async (handler: ReturnType<typeof createRealtimeLatencyHandler>, query: Record<string, unknown>) => {
+  const req = { query } as Request;
+  const res = makeJsonResponder();
+  const next = vi.fn();
+  await handler(req, res, next);
+  return { res, next };
+};
+
 describe('GET /api/realtime/latency', () => {
   it('uses readRecent when available', async () => {
     const driver: StorageDriver<RealtimeLatencySummary> = {
@@ -28,14 +51,12 @@ describe('GET /api/realtime/latency', () => {
       readAll: vi.fn(),
     };
 
-    const app = express();
-    app.get('/api/realtime/latency', createRealtimeLatencyHandler(driver));
-
-    const res = await request(app).get('/api/realtime/latency?limit=5');
+    const handler = createRealtimeLatencyHandler(driver);
+    const { res } = await callLatencyHandler(handler, { limit: '5' });
 
     expect(driver.readRecent).toHaveBeenCalledWith(5);
-    expect(res.status).toBe(200);
-    expect(res.body[0].sessionId).toBe('recent');
+    expect(res.statusCode).toBe(200);
+    expect((res.body as RealtimeLatencySummary[])[0].sessionId).toBe('recent');
   });
 
   it('falls back to readAll when readRecent is missing', async () => {
@@ -48,15 +69,13 @@ describe('GET /api/realtime/latency', () => {
       ]),
     } as StorageDriver<RealtimeLatencySummary>;
 
-    const app = express();
-    app.get('/api/realtime/latency', createRealtimeLatencyHandler(driver));
-
-    const res = await request(app).get('/api/realtime/latency?limit=1');
+    const handler = createRealtimeLatencyHandler(driver);
+    const { res } = await callLatencyHandler(handler, { limit: '1' });
 
     expect(driver.readAll).toHaveBeenCalled();
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].sessionId).toBe('new');
+    expect(res.statusCode).toBe(200);
+    expect((res.body as RealtimeLatencySummary[])).toHaveLength(1);
+    expect((res.body as RealtimeLatencySummary[])[0].sessionId).toBe('new');
   });
 
   it('defaults and clamps limit when invalid', async () => {
@@ -66,14 +85,13 @@ describe('GET /api/realtime/latency', () => {
       append: vi.fn(),
       readAll: vi.fn(),
     };
-    const app = express();
-    app.get('/api/realtime/latency', createRealtimeLatencyHandler(driver));
+    const handler = createRealtimeLatencyHandler(driver);
 
-    await request(app).get('/api/realtime/latency?limit=not-a-number');
+    await callLatencyHandler(handler, { limit: 'not-a-number' });
 
     expect(driver.readRecent).toHaveBeenCalledWith(20); // default
 
-    await request(app).get('/api/realtime/latency?limit=500');
+    await callLatencyHandler(handler, { limit: '500' });
     expect(driver.readRecent).toHaveBeenCalledWith(50); // clamped
   });
 });

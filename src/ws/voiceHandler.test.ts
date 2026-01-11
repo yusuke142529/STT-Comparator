@@ -1,8 +1,5 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 
 describe('handleVoiceConnection', () => {
   class FakeWebSocket extends EventEmitter {
@@ -118,7 +115,7 @@ describe('handleVoiceConnection', () => {
           echoSimilarity: 0.8,
         },
       },
-      ws: { keepaliveMs: 1000, maxMissedPongs: 2 },
+      ws: { keepaliveMs: 0, maxMissedPongs: 0 },
     }),
   }));
 
@@ -195,6 +192,12 @@ describe('handleVoiceConnection', () => {
     }
   };
 
+  const waitForCondition = async (check: () => boolean, max = 25) => {
+    for (let i = 0; i < max && !check(); i += 1) {
+      await flushMicrotasks();
+    }
+  };
+
   it('starts session and produces assistant audio for a committed transcript', async () => {
     vi.useFakeTimers();
     const { handleVoiceConnection } = await import('./voiceHandler.js');
@@ -203,9 +206,7 @@ describe('handleVoiceConnection', () => {
     await handleVoiceConnection(ws as any, 'ja-JP');
     ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { finalizeDelayMs: 0 } })), false);
 
-    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => Boolean(state.getOnData()));
 
     state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
     vi.runOnlyPendingTimers();
@@ -229,38 +230,47 @@ describe('handleVoiceConnection', () => {
 
   it('appends memory file contents to the system prompt', async () => {
     vi.useFakeTimers();
-    const dir = await mkdtemp(path.join(tmpdir(), 'stt-voice-memory-'));
-    const memoryPath = path.join(dir, 'memory.txt');
-    await writeFile(memoryPath, 'Memory line', 'utf-8');
     process.env.VOICE_SYSTEM_PROMPT = 'Base prompt';
-    process.env.VOICE_MEMORY_PATH = memoryPath;
+    process.env.VOICE_MEMORY_PATH = '/tmp/voice-memory.txt';
+
+    vi.doMock('node:fs/promises', async () => {
+      const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+      return {
+        ...actual,
+        readFile: vi.fn(async () => 'Memory line'),
+      };
+    });
+    vi.resetModules();
 
     const { handleVoiceConnection } = await import('./voiceHandler.js');
     const ws = new FakeWebSocket();
 
-    await handleVoiceConnection(ws as any, 'ja-JP');
-    ws.emit(
-      'message',
-      Buffer.from(
-        JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { finalizeDelayMs: 0 } })
-      ),
-      false
-    );
+    try {
+      await handleVoiceConnection(ws as any, 'ja-JP');
+      ws.emit(
+        'message',
+        Buffer.from(
+          JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { finalizeDelayMs: 0 } })
+        ),
+        false
+      );
 
-    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
-      await Promise.resolve();
+      await waitForCondition(() => Boolean(state.getOnData()));
+
+      state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
+      vi.runOnlyPendingTimers();
+      await flushMicrotasks();
+
+      const snapshots = state.getChatSnapshots();
+      expect(snapshots.length).toBeGreaterThan(0);
+      const first = snapshots[0] as Array<{ role: string; content: string }>;
+      expect(first[0]?.role).toBe('system');
+      expect(first[0]?.content).toContain('Base prompt');
+      expect(first[0]?.content).toContain('Memory line');
+    } finally {
+      vi.unmock('node:fs/promises');
+      vi.resetModules();
     }
-
-    state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
-    vi.runOnlyPendingTimers();
-    await flushMicrotasks();
-
-    const snapshots = state.getChatSnapshots();
-    expect(snapshots.length).toBeGreaterThan(0);
-    const first = snapshots[0] as Array<{ role: string; content: string }>;
-    expect(first[0]?.role).toBe('system');
-    expect(first[0]?.content).toContain('Base prompt');
-    expect(first[0]?.content).toContain('Memory line');
   });
 
   it('uses 24kHz output when OpenAI STT is selected (pipeline mode)', async () => {
@@ -275,9 +285,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => parseJsonMessages(ws).some((m) => m.type === 'voice_session'));
 
     const json = parseJsonMessages(ws);
     const sessionMsg = json.find((m) => m.type === 'voice_session');
@@ -314,9 +322,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
 
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
@@ -353,9 +359,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -409,9 +413,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -453,9 +455,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -500,9 +500,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -556,9 +554,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -604,9 +600,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -652,9 +646,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 10 && state.getOnDataAll().length < 2; i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => state.getOnDataAll().length >= 2);
     const handlers = state.getOnDataAll();
     expect(handlers.length).toBe(2);
 
@@ -687,9 +679,7 @@ describe('handleVoiceConnection', () => {
     await handleVoiceConnection(ws as any, 'ja-JP');
     ws.emit('message', Buffer.from(JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { finalizeDelayMs: 0 } })), false);
 
-    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => Boolean(state.getOnData()));
 
     state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
     vi.runOnlyPendingTimers();
@@ -719,9 +709,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => Boolean(state.getOnData()));
 
     state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
     vi.runOnlyPendingTimers();
@@ -776,9 +764,7 @@ describe('handleVoiceConnection', () => {
       false
     );
 
-    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
-      await Promise.resolve();
-    }
+    await waitForCondition(() => Boolean(state.getOnData()));
 
     // Start the first turn -> it gets stuck "thinking" waiting on firstChat.
     state.getOnData()?.({ isFinal: true, text: '最初の質問', provider: 'elevenlabs' });
@@ -831,9 +817,7 @@ describe('handleVoiceConnection', () => {
         false
       );
 
-      for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
-        await Promise.resolve();
-      }
+      await waitForCondition(() => Boolean(state.getOnData()));
 
       state.getOnData()?.({ isFinal: true, text: '最初の発話', provider: 'elevenlabs' });
       vi.runOnlyPendingTimers();

@@ -1,14 +1,18 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { LocalWhisperAdapter } from './localWhisper.js';
+vi.mock('../utils/whisper.js', () => ({
+  getWhisperRuntime: vi.fn(() => ({ pythonPath: '/usr/bin/python3' })),
+}));
 
 describe('LocalWhisperAdapter', () => {
   it('throws for streaming (not supported)', async () => {
+    const { LocalWhisperAdapter } = await import('./localWhisper.js');
     const adapter = new LocalWhisperAdapter();
     await expect(adapter.startStreaming()).rejects.toThrow(/does not support streaming/i);
   });
 
   it('uses runWhisper result for batch PCM', async () => {
+    const { LocalWhisperAdapter } = await import('./localWhisper.js');
     const adapter = new LocalWhisperAdapter();
     const wavPath = '/tmp/fake.wav';
     const expected = {
