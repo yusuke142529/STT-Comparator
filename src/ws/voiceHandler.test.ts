@@ -1,5 +1,8 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 describe('handleVoiceConnection', () => {
   class FakeWebSocket extends EventEmitter {
@@ -90,6 +93,8 @@ describe('handleVoiceConnection', () => {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
     ELEVENLABS_TTS_VOICE_ID: process.env.ELEVENLABS_TTS_VOICE_ID,
+    VOICE_SYSTEM_PROMPT: process.env.VOICE_SYSTEM_PROMPT,
+    VOICE_MEMORY_PATH: process.env.VOICE_MEMORY_PATH,
   };
 
   beforeEach(() => {
@@ -159,10 +164,20 @@ describe('handleVoiceConnection', () => {
     }),
   }));
 
+  const restoreEnv = (key: string, value: string | undefined) => {
+    if (value === undefined) {
+      delete process.env[key];
+      return;
+    }
+    process.env[key] = value;
+  };
+
   afterEach(() => {
-    process.env.OPENAI_API_KEY = envSnapshot.OPENAI_API_KEY;
-    process.env.ELEVENLABS_API_KEY = envSnapshot.ELEVENLABS_API_KEY;
-    process.env.ELEVENLABS_TTS_VOICE_ID = envSnapshot.ELEVENLABS_TTS_VOICE_ID;
+    restoreEnv('OPENAI_API_KEY', envSnapshot.OPENAI_API_KEY);
+    restoreEnv('ELEVENLABS_API_KEY', envSnapshot.ELEVENLABS_API_KEY);
+    restoreEnv('ELEVENLABS_TTS_VOICE_ID', envSnapshot.ELEVENLABS_TTS_VOICE_ID);
+    restoreEnv('VOICE_SYSTEM_PROMPT', envSnapshot.VOICE_SYSTEM_PROMPT);
+    restoreEnv('VOICE_MEMORY_PATH', envSnapshot.VOICE_MEMORY_PATH);
     state.reset();
     realtimeState.reset();
     vi.clearAllMocks();
@@ -210,6 +225,42 @@ describe('handleVoiceConnection', () => {
 
     const binaries = ws.sent.filter((m): m is Buffer => Buffer.isBuffer(m));
     expect(binaries.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('appends memory file contents to the system prompt', async () => {
+    vi.useFakeTimers();
+    const dir = await mkdtemp(path.join(tmpdir(), 'stt-voice-memory-'));
+    const memoryPath = path.join(dir, 'memory.txt');
+    await writeFile(memoryPath, 'Memory line', 'utf-8');
+    process.env.VOICE_SYSTEM_PROMPT = 'Base prompt';
+    process.env.VOICE_MEMORY_PATH = memoryPath;
+
+    const { handleVoiceConnection } = await import('./voiceHandler.js');
+    const ws = new FakeWebSocket();
+
+    await handleVoiceConnection(ws as any, 'ja-JP');
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({ type: 'config', pcm: true, clientSampleRate: 16000, options: { finalizeDelayMs: 0 } })
+      ),
+      false
+    );
+
+    for (let i = 0; i < 5 && !state.getOnData(); i += 1) {
+      await Promise.resolve();
+    }
+
+    state.getOnData()?.({ isFinal: true, text: 'こんにちは', provider: 'elevenlabs' });
+    vi.runOnlyPendingTimers();
+    await flushMicrotasks();
+
+    const snapshots = state.getChatSnapshots();
+    expect(snapshots.length).toBeGreaterThan(0);
+    const first = snapshots[0] as Array<{ role: string; content: string }>;
+    expect(first[0]?.role).toBe('system');
+    expect(first[0]?.content).toContain('Base prompt');
+    expect(first[0]?.content).toContain('Memory line');
   });
 
   it('uses 24kHz output when OpenAI STT is selected (pipeline mode)', async () => {

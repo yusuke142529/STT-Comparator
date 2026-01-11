@@ -1,2 +1,7 @@
 packages:
   - client
+
+onlyBuiltDependencies:
+  - '@ffmpeg-installer/darwin-arm64'
+  - better-sqlite3
+  - esbuild

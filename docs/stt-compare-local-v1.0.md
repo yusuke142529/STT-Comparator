@@ -243,6 +243,9 @@ ELEVENLABS_API_KEY=xi_xxx      # ElevenLabs を使うにはキーを設定
 WHISPER_WS_URL=ws://localhost:8000/v1/audio/transcriptions
 WHISPER_HTTP_URL=http://localhost:8000/v1/audio/transcriptions
 WHISPER_MODEL=small            # faster-whisper-server へ渡すモデル名
+# VOICE_SYSTEM_PROMPT=あなたは日本語で会話する音声アシスタントです。簡潔で自然な日本語で答えてください。
+# VOICE_MEMORY_PATH=./voice-memory.txt
+# VOICE_HISTORY_MAX_TURNS=12
 # 電文が応答しない場合のバッチタイムアウト（ミリ秒）。省略時は 60000。
 ELEVENLABS_BATCH_TIMEOUT_MS=60000
 # 再試行を増やすには以下の値を設定。いずれも省略時は 3 回 / 拡張バックオフ（1000ms → 5000ms）です。
@@ -265,6 +268,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
   "storage": { "driver": "jsonl", "path": "./runs/{date}" }, // driver は jsonl または sqlite（{date} は YYYY-MM-DD に展開）
   "providers": ["deepgram", "elevenlabs", "openai", "local_whisper", "whisper_streaming"], // ローカル用途の現行デフォルト（`mock` は任意追加）
   "voice": {
+    "memoryPath": "./voice-memory.txt",
     "vad": { "threshold": 0.45, "silenceDurationMs": 500, "prefixPaddingMs": 300 },
     "meetingGate": {
       "enabled": true,
@@ -303,6 +307,7 @@ ELEVENLABS_BATCH_MAX_DELAY_MS=5000
 }
 ```
 - 日本語CERでプロバイダが空白を挿入してしまうケースを吸収したい場合は、評価マニフェスト（ref_json）側で `normalization.stripSpace=true` を指定してください（ジョブ単位で切替可能）。
+- 音声会話の事前記憶は `VOICE_MEMORY_PATH` または `voice.memoryPath` にテキストファイルを指定し、system prompt に追記してセッション開始時に読み込まれます。
 - `storage.path` は `{date}` プレースホルダを含められ、`YYYY-MM-DD` に展開される（例: `./runs/{date}`）。展開はサーバ起動時に行われるため、日付跨ぎで切り替えるには再起動が必要。
 - `providerLimits.batchMaxBytes` はプロバイダごとのアップロード上限（バイト）を上書きできる。
 - `ws.keepaliveMs` / `ws.maxMissedPongs` は WS の疎通監視設定。

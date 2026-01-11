@@ -80,6 +80,7 @@ const voiceSchema = z
   .object({
     presets: z.array(voicePresetSchema).min(1).max(20).optional(),
     defaultPresetId: z.string().min(1).max(50).optional(),
+    memoryPath: z.string().min(1).max(500).optional(),
     vad: voiceVadSchema.optional(),
     meetingGate: voiceMeetingGateSchema.optional(),
     meeting: voiceMeetingSchema.optional(),

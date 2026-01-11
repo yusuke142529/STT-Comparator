@@ -67,6 +67,7 @@ UI の「音声会話」タブは、マイク入力 → STT → LLM → TTS → 
   - `deepgram`: `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`
 - ヘルス: `GET /api/voice/status`
 - WS: `/ws/voice?lang=ja-JP`
+- 事前記憶: `VOICE_MEMORY_PATH` または `config.json` の `voice.memoryPath` にテキストファイルを指定すると、system prompt に追記してセッション開始時に読み込みます。
 - VAD調整: `config.json` の `voice.vad` で閾値/無音長/プレフィックスを調整（音声会話のみ影響、Realtime比較には影響しません）。
 - 参考: `voice_assistant_audio_start` に `llmMs` / `ttsTtfbMs` が含まれ、UI に表示されます（体感遅延の内訳確認に利用）。
 - 日本語品質: `lang` が `ja-*` で `ELEVENLABS_TTS_MODEL_ID` 未設定の場合は `eleven_multilingual_v2` を自動適用（アカウント/モデル非対応時は自動で無指定にフォールバック）。

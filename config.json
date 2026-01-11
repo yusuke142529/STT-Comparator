@@ -35,6 +35,7 @@
     "refreshMs": 5000
   },
   "voice": {
+    "memoryPath": "./voice-memory.txt",
     "vad": {
       "silenceDurationMs": 250
     },

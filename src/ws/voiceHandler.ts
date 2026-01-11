@@ -1,6 +1,9 @@
 import type { RawData, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { loadConfig } from '../config.js';
+import type { AppConfig } from '../config.js';
 import { getAdapter } from '../adapters/index.js';
 import { logger } from '../logger.js';
 import { bufferToArrayBuffer } from '../utils/buffer.js';
@@ -33,11 +36,42 @@ import { startOpenAiRealtimeVoiceSession } from '../voice/openaiRealtimeVoice.js
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
-function getSystemPrompt(): string {
+function getBaseSystemPrompt(): string {
   return (
     process.env.VOICE_SYSTEM_PROMPT ??
     'あなたは日本語で会話する音声アシスタントです。簡潔で自然な日本語で答えてください。'
   );
+}
+
+function resolveVoiceMemoryPath(config: AppConfig): string | null {
+  const envPath = process.env.VOICE_MEMORY_PATH?.trim();
+  if (envPath) return envPath;
+  const configPath = config.voice?.memoryPath?.trim();
+  return configPath || null;
+}
+
+async function loadVoiceMemory(config: AppConfig): Promise<string | null> {
+  const memoryPath = resolveVoiceMemoryPath(config);
+  if (!memoryPath) return null;
+  const resolved = path.resolve(memoryPath);
+  let raw: string;
+  try {
+    raw = await readFile(resolved, 'utf-8');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`failed to read voice memory (${resolved}): ${message}`);
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    logger.warn({ event: 'voice_memory_empty', path: resolved });
+    return null;
+  }
+  return trimmed;
+}
+
+function buildSystemPrompt(basePrompt: string, memoryText: string | null): string {
+  if (!memoryText) return basePrompt;
+  return `${basePrompt}\n\n[事前記憶]\n${memoryText}`;
 }
 
 function getHistoryMaxTurns(): number {
@@ -145,9 +179,24 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
   let voiceState: VoiceState = 'listening';
   let finalizeDelayMs = 200;
 
-  const systemPrompt = getSystemPrompt();
+  const baseSystemPrompt = getBaseSystemPrompt();
+  let systemPrompt = baseSystemPrompt;
   const historyMaxTurns = getHistoryMaxTurns();
   const history: ChatMessage[] = [{ role: 'system', content: systemPrompt }];
+  let memoryLoaded = false;
+  let memoryLoadPromise: Promise<void> | null = null;
+  const ensureVoiceMemoryLoaded = async () => {
+    if (memoryLoaded) return;
+    if (!memoryLoadPromise) {
+      memoryLoadPromise = (async () => {
+        const memoryText = await loadVoiceMemory(config);
+        systemPrompt = buildSystemPrompt(baseSystemPrompt, memoryText);
+        history[0] = { role: 'system', content: systemPrompt };
+        memoryLoaded = true;
+      })();
+    }
+    await memoryLoadPromise;
+  };
   const trimHistory = () => {
     while (history.length > 1 + historyMaxTurns * 2) {
       history.splice(1, 2);
@@ -1022,6 +1071,8 @@ export async function handleVoiceConnection(ws: WebSocket, lang: string) {
     clientSampleRate = msg.clientSampleRate;
     finalizeDelayMs = msg.options?.finalizeDelayMs ?? finalizeDelayMs;
     const enableInterim = msg.enableInterim !== false;
+
+    await ensureVoiceMemoryLoaded();
 
     const preset = resolveVoicePreset(config, msg.presetId);
     if (!preset.available) {
