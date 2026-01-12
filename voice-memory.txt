@@ -33,7 +33,7 @@ _site_wide_common
 
   * コンタクトセンターソリューション:
 
-    * Alive Line ⁺Plus（`/service/aliveline-plus/`）
+    * Alive Line Plus（`/service/aliveline-plus/`）
     * Alive Line（`/service/aliveline/`）
     * Voiper SMS（`/service/voipersms/`）
     * Voiper PBX（`/service/voiper-pbx/`）
@@ -80,7 +80,7 @@ home.service_catalog_summary (コンタクトセンターソリューション)
 
   * short_desc: インターネットを利用した企業の電話環境を構築する回線。従来の固定電話回線より高速で通信。
   * listed_features: 秒課金/分課金の選べる料金プラン; 回線だけの乗り換えOK; 無料シミュレーションあり。 ([アライブネット][1])
-* Alive Line ⁺Plus:
+* Alive Line Plus:
 
   * short_desc: 全国47都道府県の市外局番を提供（「札幌011」「大阪06」「福岡092」「那覇098」等の例示）。
   * listed_features: 全国市外局番の取得; 番号ポータビリティ; 各種PBX/CTI接続。 ([アライブネット][1])
@@ -90,7 +90,7 @@ home.service_catalog_summary (コンタクトセンターソリューション)
   * listed_features: インバウンド業務; アウトバウンド業務; 通話管理機能; マルチテナント機能; レポート機能。 ([アライブネット][1])
 * Voiper PBX:
 
-  * short_desc: 高機能PBXを低価格で。AliveLine/AliveLine⁺Plusとのセット利用で利便性を提供。
+  * short_desc: 高機能PBXを低価格で。AliveLine/AliveLinePlusとのセット利用で利便性を提供。
   * listed_features: 主装置不要で簡単導入; 明朗な料金体系; どこでも同じ通話環境を構築。 ([アライブネット][1])
 * Voiper Call:
 
@@ -122,7 +122,7 @@ home.news_teaser_section
 
 * items_shown_on_home:
 
-  * 2025-11-27: 新サービス「AliveLine⁺Plus」「VoiperPBX」リリースのお知らせ（個別記事URLはニュース記事として存在）。 ([アライブネット][1])
+  * 2025-11-27: 新サービス「AliveLinePlus」「VoiperPBX」リリースのお知らせ（個別記事URLはニュース記事として存在）。 ([アライブネット][1])
   * 2025-07-31: サイトリニューアルのお知らせ（個別記事URLはニュース記事として存在）。 ([アライブネット][1])
 
 home.contact_teaser_section
@@ -333,7 +333,7 @@ AliveLine.billing_notes
 
 * billing_common_notes を適用。 ([アライブネット][10])
 
-SERVICE: Alive Line ⁺Plus（全国47都道府県 市外局番提供） (`/service/aliveline-plus/`)
+SERVICE: Alive Line Plus（全国47都道府県 市外局番提供） (`/service/aliveline-plus/`)
 AliveLinePlus.positioning
 
 * statement: 全国47都道府県の市外局番（0ABJ番号）提供のクラウド回線サービス。
@@ -666,7 +666,7 @@ VoiperCall.pricing (税別)
 SERVICE: Voiper PBX（クラウドPBX最新版） (`/service/voiper-pbx/`)
 VoiperPBX.homepage_level_info_only（ホームページ上の要約レベルで確認できた範囲）
 
-* positioning: 高機能PBXを低価格で、AliveLine/AliveLine⁺Plusとのセット利用で利便性提供。
+* positioning: 高機能PBXを低価格で、AliveLine/AliveLinePlusとのセット利用で利便性提供。
 * listed_features: 主装置不要; 簡単導入; 明朗な料金体系; どこでも同じ通話環境を構築。 ([アライブネット][1])
   VoiperPBX.page_detail_extracted
 * page_exists: `https://alivenet.com/service/voiper-pbx/`（本文詳細は抽出済みソースに存在するが、本コンテキストでは再表示取得不可のため、ここでは「抽出不可」扱いで保持）。 ([アライブネット][14])
@@ -687,7 +687,7 @@ news.list_page_exists
 
 * `https://alivenet.com/news/`（本文一覧の抽出不足により、全件タイトル・日付は未取得）。 ([アライブネット][2])
   news.items_confirmed_via_home_teaser
-* 2025-11-27: 新サービス「AliveLine⁺Plus」「VoiperPBX」リリースのお知らせ（個別記事ページ存在）。 ([アライブネット][1])
+* 2025-11-27: 新サービス「AliveLinePlus」「VoiperPBX」リリースのお知らせ（個別記事ページ存在）。 ([アライブネット][1])
 * 2025-07-31: サイトリニューアルのお知らせ（個別記事ページ存在）。 ([アライブネット][1])
 
 OTHER_SERVICES_PAGES_EXISTENCE_ONLY
@@ -712,7 +712,7 @@ CORPORATE_AND_POLICIES_EXISTENCE_ONLY
 [8]: https://alivenet.com/reason/ "アライブネットのコンタクトセンターが選ばれる理由 | アライブネット"
 [9]: https://alivenet.com/service/voipercall/ "イン・アウト両対応のCTI「Voiper Call」｜株式会社アライブネット"
 [10]: https://alivenet.com/service/aliveline/ "通話料の大幅カットを実現！「Alive Line」｜株式会社アライブネット"
-[11]: https://alivenet.com/service/aliveline-plus/ "Alive Line ⁺Plus | アライブネット"
+[11]: https://alivenet.com/service/aliveline-plus/ "Alive Line Plus | アライブネット"
 [12]: https://alivenet.com/service/voipersms/ "経費削減を実現するSMS配信「Voiper SMS」｜株式会社アライブネット"
 [13]: https://alivenet.com/service/voiperdial/price/ "クラウド型CTI システム「Voiper Dial」｜料金｜株式会社アライブネット"
 [14]: https://alivenet.com/service/voiper-pbx/ "Voiper PBX | アライブネット"
